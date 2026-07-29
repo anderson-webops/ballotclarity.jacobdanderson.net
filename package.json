@@ -3,7 +3,11 @@
 	"type": "module",
 	"version": "1.0.0",
 	"private": true,
-	"packageManager": "npm@11.7.0",
+	"packageManager": "npm@11.16.0",
+	"engines": {
+		"node": ">=24.18.0 <25",
+		"npm": ">=11.16.0 <12"
+	},
 	"description": "Monorepo for the Ballot Clarity civic-information service",
 	"author": "Jacob Anderson",
 	"license": "MIT",
