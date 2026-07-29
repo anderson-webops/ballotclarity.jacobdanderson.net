@@ -28,8 +28,8 @@ test("GitHub workflows use Node 24-compatible action majors", () => {
 
 	assert.doesNotMatch(workflows, /actions\/checkout@v4/);
 	assert.doesNotMatch(workflows, /actions\/setup-node@v4/);
-	assert.match(workflows, /actions\/checkout@v6/);
-	assert.match(workflows, /actions\/setup-node@v6/);
+	assert.match(workflows, /actions\/checkout@v7/);
+	assert.match(workflows, /actions\/setup-node@v7/);
 });
 
 test("CI runs the repository security audit policy", () => {
