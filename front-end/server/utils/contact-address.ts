@@ -132,7 +132,8 @@ function getNodeRequestURL(event: H3Event) {
 		|| getFirstHeaderValue(getNodeRequestHeader(event, "host"))
 		|| "localhost";
 	const forwardedProto = getFirstHeaderValue(getNodeRequestHeader(event, "x-forwarded-proto"));
-	const protocol = forwardedProto || (event.node?.req.socket.encrypted ? "https" : "http");
+	const socket = event.node.req.socket;
+	const protocol = forwardedProto || ("encrypted" in socket && socket.encrypted ? "https" : "http");
 	const rawUrl = event.node?.req.url || "/";
 
 	try {

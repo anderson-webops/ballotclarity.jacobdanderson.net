@@ -81,14 +81,21 @@
 	},
 	"overrides": {
 		"esbuild": "^0.28.1",
-		"js-yaml": "4.2.0",
+		"js-yaml": "4.3.0",
 		"launch-editor": "2.14.1",
 		"vite": {
 			".": "^8.1.0",
 			"esbuild": "^0.28.1"
 		},
 		"nitropack": "2.13.4",
-		"simple-git": "3.36.0"
+		"simple-git": "3.36.0",
+		"brace-expansion": "5.0.8",
+		"fast-uri": "3.1.4",
+		"postcss": "8.5.24",
+		"shell-quote": "1.10.0",
+		"svgo": "4.0.2",
+		"tar": "7.5.22",
+		"valibot": "1.4.2"
 	},
 	"allowScripts": {
 		"esbuild@0.27.7": true,
