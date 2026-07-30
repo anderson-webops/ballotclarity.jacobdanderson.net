@@ -59,7 +59,7 @@ test("repository install-script approvals are explicit and version-scoped", () =
 		"@parcel/watcher@2.5.6": true,
 		"esbuild@0.28.1": true,
 		"fsevents@2.3.3": true,
-		puppeteer: false,
+		"puppeteer@25.4.0": false,
 		"unrs-resolver@1.12.2": true
 	});
 	assert.match(readText(".npmrc"), /^strict-allow-scripts=true$/mu);

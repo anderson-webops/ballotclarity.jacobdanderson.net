@@ -31,6 +31,21 @@ const { data: guideDistrictData, error: guideDistrictError, pending: guideDistri
 const { data: guideRepresentativesData, refresh: refreshGuideRepresentativesData } = await useRepresentatives(directoryApiQuery);
 
 if (import.meta.client) {
+	watch(activeLookupQuery, (query, previousQuery) => {
+		if (
+			!query?.lookup
+			|| (
+				query.lookup === previousQuery?.lookup
+				&& query.selection === previousQuery?.selection
+			)
+		) {
+			return;
+		}
+
+		void refreshGuideDistrictData();
+		void refreshGuideRepresentativesData();
+	}, { immediate: true });
+
 	watch(activeGuideAreaQuery, (query, previousQuery) => {
 		if (!query?.area || query.area === previousQuery?.area || activeLookupQuery.value)
 			return;

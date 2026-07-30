@@ -4460,6 +4460,10 @@ export async function createApp(options: CreateAppOptions = {}) {
 	async function resolveActiveNationwideLookup(request: express.Request, response: express.Response) {
 		const routeLookup = typeof request.query.lookup === "string" ? request.query.lookup.trim() : "";
 		const routeSelectionId = typeof request.query.selection === "string" ? request.query.selection.trim() : "";
+		const savedLookupContext = readActiveNationwideLookupContext(
+			request.header("cookie"),
+			activeLookupCookieSecret
+		);
 
 		if (routeLookup) {
 			if (!exactZipLookupPattern.test(routeLookup)) {
@@ -4491,6 +4495,14 @@ export async function createApp(options: CreateAppOptions = {}) {
 				return null;
 			}
 
+			if (
+				savedLookupContext?.inputKind === "zip"
+				&& savedLookupContext.normalizedAddress === routeLookup
+				&& (savedLookupContext.selectionId ?? "") === routeSelectionId
+			) {
+				return savedLookupContext;
+			}
+
 			const lookupResponse = await resolveLocationLookup(routeLookup, response.locals.requestId, routeSelectionId || undefined);
 			const activeLookupContext = buildActiveNationwideLookupContext(lookupResponse);
 			const activeLookupCookie = buildActiveNationwideLookupCookie(lookupResponse, activeLookupCookieSecret);
@@ -4501,12 +4513,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			return activeLookupContext;
 		}
 
-		const activeLookupContext = readActiveNationwideLookupContext(
-			request.header("cookie"),
-			activeLookupCookieSecret
-		);
-
-		if (!activeLookupContext)
+		if (!savedLookupContext)
 			return null;
 
 		const throttleState = publicLookupThrottle.attempt(buildPublicThrottleKey(request));
@@ -4524,7 +4531,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			return null;
 		}
 
-		return activeLookupContext;
+		return savedLookupContext;
 	}
 
 	const trustProxy = parseTrustProxySetting(options.trustProxy ?? process.env.TRUST_PROXY);

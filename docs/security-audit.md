@@ -42,10 +42,19 @@ Guide publication requires an authenticated administrator with enrolled MFA, a s
 - Rejected unsafe remote coverage destinations and redirects, bounded coverage downloads, sanitized public links and structured data, and kept unreviewed or unpublished election content out of public routes.
 - Aligned local, CI, and package metadata on Node 24.18.0 LTS with npm 11.16.0; optional native packages are installed and checked on Linux ARM64.
 - Replaced Nitro's vulnerable Archiver 7 dependency path with a tested local compatibility bridge backed by Archiver 8.
+  The bridge has a semver-compatible local identity and its exact source remains pinned by repository tests.
 - Made the backend incremental compiler cache part of the disposable build output and added a post-build import-closure check so a stale cache cannot produce an incomplete deploy artifact.
 - Made local `.env` generation exclusive and symlink-safe, with owner-only permissions and atomic replacement for an explicit `--force`; local setup and verification commands no longer print environment-derived paths or values.
 - Replaced provider-derived slug regular expressions with a bounded single-pass normalizer and structured launch-directory logging with control-character removal.
-- Pinned CI actions by commit, required SHA-pinned Actions at the repository level, added CodeQL and zero-exception full and production audits, enabled Dependabot alerts/security updates, secret scanning with push protection, and private vulnerability reporting, and kept install-script approvals explicit.
+- Pinned CI actions by commit, disabled persisted checkout credentials, required SHA-pinned Actions at the repository
+  level, updated Qodana to the current reviewed action, added CodeQL plus zero-exception full, production, and registry
+  signature audits, enabled Dependabot alerts/security updates, secret scanning with push protection, and private
+  vulnerability reporting, and kept install-script approvals explicit.
+- Refreshed the compatible Antfu ESLint, Puppeteer, Nuxt, and Vite toolchain. The full dependency graph now resolves
+  optional peers without invalid attachments while retaining Node 24 type definitions and TypeScript 6 for the
+  production runtime and supported parser boundary.
+- Replaced fixed native-binding paths with lockfile-driven discovery that verifies every GNU and musl Linux ARM64
+  optional package, including Oxfmt and Rollup, at the exact parent dependency version.
 
 ## Code-scanning interpretation
 
@@ -77,6 +86,7 @@ npm run verify:native-bindings
 npm run audit:raw
 npm run audit:production
 npm run audit
+npm run audit:signatures
 npm run lint
 npm run typecheck
 npm run test
@@ -90,6 +100,8 @@ npm run a11y
 - `npm run audit:raw` checks the complete workspace dependency graph, including development tooling.
 - `npm run audit:production` checks the deployment graph with development dependencies omitted.
 - `npm run audit` is the repository's testable zero-exception CI wrapper.
+- `npm run audit:signatures` verifies registry signatures and available provenance attestations for the installed graph;
+  the small local Archiver bridge is separately pinned and behavior-tested in source.
 - Strict install-script policy makes the root and standalone-backend clean installs fail if a dependency lifecycle script is not explicitly approved or denied.
 - Standalone backend-lockfile verification prevents the secondary deployment lockfile from drifting behind its manifest.
 - Native-binding verification and the ARM64 CI job prevent platform optional packages from silently disappearing from the lockfile.

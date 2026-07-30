@@ -2254,6 +2254,75 @@ test("saved nationwide lookup routes share the public provider throttle", async 
 	}
 });
 
+test("matching signed lookup context avoids repeating an external route lookup", async () => {
+	let lookupCalls = 0;
+	const isolatedServer = (await createApp({
+		adminDbPath: ":memory:",
+		congressClient: null,
+		coverageRepository: buildTestCoverageRepository(),
+		googleCivicClient: null,
+		ldaClient: null,
+		openFecClient: null,
+		openStatesClient: null,
+		zipLocationService: {
+			async lookupZip(zipCode: string) {
+				lookupCalls += 1;
+				return {
+					matches: [{
+						countyFips: "049",
+						countyName: "Utah County",
+						districtMatches: [{
+							districtCode: "3",
+							districtType: "congressional",
+							id: "congressional:3",
+							label: "Congressional District 3",
+							sourceSystem: "U.S. Census Geocoder"
+						}],
+						id: `zip:${zipCode}:provo-utah`,
+						latitude: 40.2338,
+						locality: "Provo",
+						longitude: -111.6585,
+						postalCode: zipCode,
+						representativeMatches: [],
+						sourceSystem: "Test ZIP provider",
+						stateAbbreviation: "UT",
+						stateName: "Utah"
+					}],
+					postalCode: zipCode
+				};
+			}
+		}
+	})).listen(0, "127.0.0.1");
+	await once(isolatedServer, "listening");
+	const isolatedAddress = isolatedServer.address() as AddressInfo;
+	const isolatedBaseUrl = `http://127.0.0.1:${isolatedAddress.port}`;
+
+	try {
+		const lookupResponse = await fetch(`${isolatedBaseUrl}/api/location`, {
+			body: JSON.stringify({ q: "84604" }),
+			headers: {
+				"Content-Type": "application/json"
+			},
+			method: "POST"
+		});
+		const cookie = lookupResponse.headers.get("set-cookie")?.split(";")[0] || "";
+		const routeResponse = await fetch(`${isolatedBaseUrl}/api/representatives?lookup=84604`, {
+			headers: { cookie }
+		});
+		const routeBody = await routeResponse.json();
+
+		assert.equal(lookupResponse.status, 200);
+		assert.equal(routeResponse.status, 200);
+		assert.equal(routeBody.mode, "nationwide");
+		assert.equal(lookupCalls, 1);
+	}
+	finally {
+		await new Promise<void>((resolve, reject) => {
+			isolatedServer.close(error => error ? reject(error) : resolve());
+		});
+	}
+});
+
 test("GET /api/location/guess returns 404 when configured proxy geo headers are unavailable", async () => {
 	const response = await fetch(`${baseUrl}/api/location/guess`);
 	const body = await response.json();

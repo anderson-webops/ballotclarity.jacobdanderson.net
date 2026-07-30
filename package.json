@@ -21,6 +21,7 @@
 		"audit": "node scripts/security-audit.mjs",
 		"audit:raw": "npm audit --workspaces",
 		"audit:production": "npm audit --workspaces --omit=dev",
+		"audit:signatures": "npm audit signatures",
 		"audit-fix": "npm audit fix --workspaces",
 		"build": "npm run -w front-end build && npm run -w back-end build",
 		"db:down": "docker compose down",
@@ -73,7 +74,7 @@
 		"archiver": "file:vendor/archiver-nitro-compat"
 	},
 	"devDependencies": {
-		"@antfu/eslint-config": "^8.3.0",
+		"@antfu/eslint-config": "^9.2.0",
 		"@typescript-eslint/eslint-plugin": "^8.61.0",
 		"@typescript-eslint/parser": "^8.61.0",
 		"@unocss/eslint-plugin": "^66.7.2",
@@ -85,7 +86,7 @@
 		"eslint-plugin-vue": "^10.9.2",
 		"globals": "^17.6.0",
 		"prettier": "^3.8.4",
-		"puppeteer": "^24.43.1",
+		"puppeteer": "^25.4.0",
 		"tsx": "^4.22.4",
 		"typescript": "^6.0.3",
 		"typescript-eslint": "^8.61.0"
@@ -95,7 +96,7 @@
 		"js-yaml": "4.3.0",
 		"launch-editor": "2.14.1",
 		"vite": {
-			".": "^8.1.0",
+			".": "^8.2.0",
 			"esbuild": "^0.28.1"
 		},
 		"nitropack": {
@@ -115,6 +116,6 @@
 		"@parcel/watcher@2.5.6": true,
 		"unrs-resolver@1.12.2": true,
 		"fsevents@2.3.3": true,
-		"puppeteer": false
+		"puppeteer@25.4.0": false
 	}
 }

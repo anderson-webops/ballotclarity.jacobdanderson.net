@@ -29,7 +29,7 @@ export function normalizeDisplayTimeZone(value: string | null | undefined) {
 
 export function detectBrowserDisplayTimeZone() {
 	try {
-		return normalizeDisplayTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone);
+		return normalizeDisplayTimeZone(new Intl.DateTimeFormat().resolvedOptions().timeZone);
 	}
 	catch {
 		return null;

@@ -26,6 +26,20 @@ const directoryApiQuery = computed(() => activeLookupQuery.value ?? activeGuideA
 const { data: guideData, error: guideError, pending: guidePending, refresh: refreshGuideData } = await useRepresentatives(directoryApiQuery);
 
 if (import.meta.client) {
+	watch(activeLookupQuery, (query, previousQuery) => {
+		if (
+			!query?.lookup
+			|| (
+				query.lookup === previousQuery?.lookup
+				&& query.selection === previousQuery?.selection
+			)
+		) {
+			return;
+		}
+
+		void refreshGuideData();
+	}, { immediate: true });
+
 	watch(activeGuideAreaQuery, (query, previousQuery) => {
 		if (!query?.area || query.area === previousQuery?.area || activeLookupQuery.value)
 			return;

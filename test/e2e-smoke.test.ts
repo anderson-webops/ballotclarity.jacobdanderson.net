@@ -10,6 +10,7 @@ import process from "node:process";
 import test, { after, before } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { buildActiveNationwideLookupCookieFromContext } from "../back-end/src/active-nationwide-lookup.ts";
+import { mergeRepresentativeMatchesWithSupplementalRecords } from "../back-end/src/supplemental-officeholders.ts";
 import {
 	staleClientBuildStorageKey,
 	staleClientReloadKeyPrefix,
@@ -93,7 +94,7 @@ const nationwideLookupSnapshot = {
 				status: "available"
 			},
 			representatives: {
-				detail: "Current representative data is available for this lookup from Open States (5 matches).",
+				detail: "Current representative data is available for this lookup from Open States and reviewed official local sources (7 matches).",
 				label: "Representative data",
 				status: "available"
 			},
@@ -212,6 +213,12 @@ const nationwideLookupSnapshot = {
 	selectedIssues: [],
 	selectedLocation: null
 };
+Object.assign(nationwideLookupSnapshot.nationwideLookupResult, {
+	representativeMatches: mergeRepresentativeMatchesWithSupplementalRecords(
+		nationwideLookupSnapshot.nationwideLookupResult.representativeMatches,
+		nationwideLookupSnapshot.nationwideLookupResult.districtMatches
+	)
+});
 
 const guideShellOnlySnapshot = {
 	ballotPlan: {},
@@ -1401,7 +1408,7 @@ test("nationwide lookup context survives client navigation across results, distr
 		const resultsText = await getDocumentBodyText(cdp);
 		assert.match(resultsText, /Provo, Utah/);
 		assert.match(resultsText, /Representative data/);
-		assert.match(resultsText, /5 representative matches/);
+		assert.match(resultsText, /7 representative matches/);
 		assert.match(resultsText, /Civic results ready/i);
 
 		await navigateAndWait(cdp, `${appBaseUrl}/districts`, "nationwide-context districts navigation");
@@ -1615,7 +1622,7 @@ test("built app server-renders district and representative routes when the activ
 	assert.match(districtHtml, /No city officeholder data is attached here yet\. This does not mean the city has no officials\.|CURRENT REPRESENTATIVE|Open representative/i);
 	assert.equal(representativesPage.status, 200);
 	assert.match(representativesHtml, /Mike Kennedy/);
-	assert.match(representativesHtml, /5 current officials across 5 district matches/);
+	assert.match(representativesHtml, /7 current officials across 5 district matches/);
 	assert.equal(representativePage.status, 200);
 	assert.match(representativeHtml, /Mike Kennedy/);
 	assert.doesNotMatch(representativeHtml, /Representative profile not available/);

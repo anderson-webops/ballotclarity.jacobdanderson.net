@@ -32,10 +32,15 @@ test("GitHub workflows pin every third-party action to a commit", () => {
 	assert.ok(actionReferences.length > 0);
 	for (const [, action, reference] of actionReferences)
 		assert.match(reference, /^[a-f\d]{40}$/u, `${action} must use a full commit SHA`);
+	assert.equal(
+		workflows.match(/persist-credentials: false/gu)?.length,
+		workflows.match(/uses:\s+actions\/checkout@/gu)?.length,
+	);
 
 	assert.match(workflows, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/);
 	assert.match(workflows, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
 	assert.match(workflows, /github\/codeql-action\/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81/);
+	assert.match(workflows, /JetBrains\/qodana-action@b588768b6e7e6da579e518bc584f79de0d243692/);
 });
 
 test("CI runs the repository security audit policy", () => {
@@ -46,6 +51,7 @@ test("CI runs the repository security audit policy", () => {
 	assert.match(workflow, /name: Verify standalone backend lockfile\s+run: npm run verify:backend-lockfile/);
 	assert.match(workflow, /name: Security audit policy\s+run: npm run audit/);
 	assert.match(workflow, /name: Production dependency audit\s+run: npm run audit:production/);
+	assert.match(workflow, /name: Verify registry signatures\s+run: npm run audit:signatures/);
 });
 
 test("CI verifies the deploy host's ARM64 native dependency path", () => {
