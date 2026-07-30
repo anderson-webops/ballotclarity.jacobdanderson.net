@@ -47,6 +47,8 @@ try {
 	writeEnv(envPath, {
 		ADMIN_API_BASE: "http://127.0.0.1:3001/api",
 		ADMIN_API_KEY: secret(),
+		ACTIVE_LOOKUP_COOKIE_SECRET: secret(),
+		ADDRESS_CACHE_ENCRYPTION_KEY: secret(),
 		ADMIN_DATABASE_URL: "postgres://ballotclarity:secret@db.internal:5432/ballotclarity",
 		ADMIN_LOGIN_LOCKOUT_MS: "1800000",
 		ADMIN_LOGIN_MAX_ATTEMPTS: "5",

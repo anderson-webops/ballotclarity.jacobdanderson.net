@@ -180,7 +180,7 @@ test("public policy pages avoid host-specific maintenance wording", () => {
 	assert.match(policyText, /currently published for this service/i);
 	assert.match(policyText, /What data Ballot Clarity currently handles/);
 	assert.match(privacyPage, /currently operated by/);
-	assert.match(privacyPage, /2026-06-12T00:00:00-04:00/);
+	assert.match(privacyPage, /2026-07-29T00:00:00-04:00/);
 });
 
 test("accessibility limits use public-facing availability language", () => {

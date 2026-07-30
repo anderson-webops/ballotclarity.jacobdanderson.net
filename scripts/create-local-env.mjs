@@ -46,6 +46,8 @@ MINIO_CONSOLE_PORT=${minioConsolePort}
 ADMIN_API_BASE=http://127.0.0.1:3001/api
 ADMIN_API_KEY=${randomSecret(24)}
 ADMIN_SESSION_SECRET=${randomSecret(24)}
+ACTIVE_LOOKUP_COOKIE_SECRET=${randomSecret(32)}
+ADDRESS_CACHE_ENCRYPTION_KEY=${randomSecret(32)}
 ADMIN_STORE_DRIVER=postgres
 ADMIN_DATABASE_URL=postgres://${postgresUser}:${postgresPassword}@127.0.0.1:${postgresPort}/${postgresDb}
 

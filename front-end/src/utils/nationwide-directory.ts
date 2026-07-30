@@ -116,6 +116,11 @@ export interface NationwideDirectoryBundle {
 	representatives: RepresentativesResponse;
 }
 
+export interface NationwideDirectorySources {
+	districts?: DistrictsResponse | null;
+	representatives?: RepresentativesResponse | null;
+}
+
 export function buildNationwideDirectoryResponses(
 	context: NationwideLookupResultContext | null | undefined
 ): NationwideDirectoryBundle {
@@ -172,6 +177,93 @@ export function buildNationwideDirectoryResponses(
 			districts,
 			mode: "nationwide",
 			note: "Matched from current area results.",
+			representatives,
+			updatedAt
+		}
+	};
+}
+
+export function mergeNationwideDirectoryResponses(
+	stored: NationwideDirectoryBundle,
+	api: NationwideDirectorySources
+): NationwideDirectoryBundle {
+	const districtByCanonicalKey = new Map<string, DistrictSummary>();
+	const districtKeyBySlug = new Map<string, string>();
+	const representativeBySlug = new Map(
+		stored.representatives.representatives.map(representative => [representative.slug, representative])
+	);
+	const apiDistricts = api.districts?.districts ?? api.representatives?.districts ?? [];
+	const apiRepresentatives = api.representatives?.representatives ?? [];
+
+	for (const district of [...stored.districts.districts, ...apiDistricts]) {
+		const matchKeys = buildDistrictMatchKeys({
+			districtCode: district.slug,
+			districtType: district.office,
+			id: district.slug,
+			label: district.title,
+			sourceSystem: "Directory response"
+		}, undefined);
+		const canonicalKey = matchKeys.find(key => districtByCanonicalKey.has(key))
+			?? matchKeys[0]
+			?? `slug:${district.slug}`;
+
+		districtByCanonicalKey.set(canonicalKey, district);
+		districtKeyBySlug.set(district.slug, canonicalKey);
+	}
+
+	for (const representative of apiRepresentatives)
+		representativeBySlug.set(representative.slug, representative);
+
+	const districtSlugByCanonicalKey = new Map(
+		Array.from(districtByCanonicalKey, ([key, district]) => [key, district.slug])
+	);
+	const representatives = Array.from(representativeBySlug.values(), (representative) => {
+		const canonicalDistrictKey = districtKeyBySlug.get(representative.districtSlug);
+		const canonicalDistrictSlug = canonicalDistrictKey
+			? districtSlugByCanonicalKey.get(canonicalDistrictKey)
+			: null;
+
+		return canonicalDistrictSlug && canonicalDistrictSlug !== representative.districtSlug
+			? {
+					...representative,
+					districtSlug: canonicalDistrictSlug
+				}
+			: representative;
+	});
+	const representativeCountByDistrict = new Map<string, number>();
+
+	for (const representative of representatives) {
+		representativeCountByDistrict.set(
+			representative.districtSlug,
+			(representativeCountByDistrict.get(representative.districtSlug) ?? 0) + 1
+		);
+	}
+
+	const districts = Array.from(districtByCanonicalKey.values()).map(district => ({
+		...district,
+		representativeCount: representativeCountByDistrict.get(district.slug) ?? 0
+	}));
+	const updatedAt = [
+		stored.districts.updatedAt,
+		stored.representatives.updatedAt,
+		api.districts?.updatedAt,
+		api.representatives?.updatedAt
+	]
+		.filter((value): value is string => Boolean(value))
+		.sort()
+		.at(-1) ?? "";
+
+	return {
+		districts: {
+			districts,
+			mode: "nationwide",
+			note: "Combined from the saved area result and current reviewed directory records.",
+			updatedAt
+		},
+		representatives: {
+			districts,
+			mode: "nationwide",
+			note: "Combined from the saved area result and current reviewed directory records.",
 			representatives,
 			updatedAt
 		}

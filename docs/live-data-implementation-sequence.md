@@ -58,6 +58,8 @@ Already present and still required:
 - `ADMIN_API_BASE`
 - `ADMIN_API_KEY`
 - `ADMIN_SESSION_SECRET`
+- `ACTIVE_LOOKUP_COOKIE_SECRET`
+- `ADDRESS_CACHE_ENCRYPTION_KEY`
 - `SOURCE_ASSET_BASE_URL`
 - `LIVE_COVERAGE_FILE`
 - `LAUNCH_DIRECTORY_FILE`
@@ -68,26 +70,15 @@ These should be added in Postgres before real national or multi-jurisdiction lau
 
 ### Lookup and geography
 
-- `address_lookup`
+- `address_lookups`
   - `id`
-  - `normalized_address`
   - `input_hash`
-  - `zip5`
-  - `state`
-  - `county_fips`
-  - `census_benchmark`
-  - `census_vintage`
-  - `latitude`
-  - `longitude`
+  - `encrypted_payload`
+  - `expires_at`
   - `created_at`
-- `district_assignment`
-  - `id`
-  - `address_lookup_id`
-  - `district_type`
-  - `district_code`
-  - `source_system`
-  - `effective_date`
-  - `created_at`
+  - `updated_at`
+
+The input identifier is a keyed HMAC and the lookup result—including normalized geography and district assignments—is stored only in the authenticated encrypted payload. Cache records expire after 7 days; legacy plaintext lookup rows are removed during migration.
 
 ### Elections and contests
 

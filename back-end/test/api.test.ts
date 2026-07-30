@@ -43,6 +43,7 @@ const activitySeed = demoAdminOverview.recentActivity;
 
 function createApp(options: Parameters<typeof createApplication>[0] = {}) {
 	return createApplication({
+		activeLookupCookieSecret: "test-active-lookup-cookie-secret-that-is-long-enough",
 		allowLegacyAdminActorHeadersForTesting: true,
 		...options
 	});
@@ -1959,9 +1960,13 @@ test("POST /api/location returns the current Fulton County launch location for f
 		method: "POST"
 	});
 	const body = await response.json();
+	const setCookie = response.headers.get("set-cookie") ?? "";
 
 	assert.equal(response.status, 200);
 	assert.equal(response.headers.get("cache-control"), "no-store");
+	assert.match(setCookie, /HttpOnly/iu);
+	assert.match(setCookie, /SameSite=Strict/iu);
+	assert.doesNotMatch(setCookie, /5600|Campbellton|Trinity|30303/iu);
 	assert.equal(body.result, "resolved");
 	assert.equal(body.guideAvailability, "published");
 	assert.equal(body.inputKind, "address");
@@ -1991,6 +1996,16 @@ test("POST /api/location returns the current Fulton County launch location for f
 	assert.equal(body.availability.fullLocalGuide.status, "limited");
 	assert.match(body.note, /Census geography matched/i);
 	assert.match(body.note, /Ballot Clarity attached 2 current official matches for this address from Open States and Congress\.gov/i);
+});
+
+test("GET route enrichment refuses street addresses in URLs", async () => {
+	const response = await fetch(
+		`${baseUrl}/api/districts?lookup=${encodeURIComponent("55 Trinity Ave SW, Atlanta, GA 30303")}`
+	);
+	const body = await response.json();
+
+	assert.equal(response.status, 400);
+	assert.match(body.message, /Only an exact 5-digit ZIP code may be included in a page URL/i);
 });
 
 test("POST /api/location returns district lookup results without a published guide for out-of-guide full addresses", async () => {
@@ -2309,11 +2324,27 @@ test("active nationwide lookup cookie backs /api/districts and /api/districts/:s
 	});
 	const lookupBody = await lookupResponse.json();
 	const cookie = lookupResponse.headers.get("set-cookie")?.split(";")[0];
+	const setCookie = lookupResponse.headers.get("set-cookie") ?? "";
 
 	assert.equal(lookupResponse.status, 200);
 	assert.equal(lookupBody.result, "resolved");
 	assert.equal(lookupBody.guideAvailability, "not-published");
 	assert.ok(cookie);
+	assert.match(setCookie, /HttpOnly/iu);
+	assert.match(setCookie, /SameSite=Strict/iu);
+
+	const activeResponse = await fetch(`${baseUrl}/api/location/active`, {
+		headers: {
+			cookie: cookie || ""
+		}
+	});
+	const activeBody = await activeResponse.json();
+
+	assert.equal(activeResponse.status, 200);
+	assert.equal(activeResponse.headers.get("cache-control"), "no-store");
+	assert.equal(activeBody.lookupQuery, "84604");
+	assert.equal(activeBody.location.displayName, "Provo, Utah");
+	assert.equal(activeBody.representativeMatches[0].name, "Mike Kennedy");
 
 	const listResponse = await fetch(`${baseUrl}/api/districts`, {
 		headers: {
@@ -2346,6 +2377,19 @@ test("active nationwide lookup cookie backs /api/districts and /api/districts/:s
 	assert.ok(districtBody.officialResources.length >= 1);
 	assert.match(districtBody.note, /keeps district context, linked officials, and official election links visible for this address or ZIP result/i);
 	assertNoReaderRouteWording(districtBody);
+
+	const [cookieName, cookieValue = ""] = (cookie || "").split("=", 2);
+	const envelopeParts = cookieValue.split(".");
+	const ciphertext = envelopeParts[2] ?? "";
+	envelopeParts[2] = `${ciphertext.startsWith("A") ? "B" : "A"}${ciphertext.slice(1)}`;
+	const tamperedCookie = `${cookieName}=${envelopeParts.join(".")}`;
+	const tamperedResponse = await fetch(`${baseUrl}/api/location/active`, {
+		headers: {
+			cookie: tamperedCookie
+		}
+	});
+
+	assert.equal(await tamperedResponse.json(), null);
 });
 
 test("direct state and local district routes attach reviewed officeholder records instead of generic zero-state placeholders", async () => {

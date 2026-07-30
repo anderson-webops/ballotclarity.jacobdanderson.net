@@ -9,6 +9,10 @@ import type {
 } from "~/types/civic";
 import type { LookupContextState } from "~/utils/guide-entry";
 import { defineStore } from "pinia";
+import {
+	sanitizeLocationSelectionForStorage,
+	sanitizeNationwideLookupResultForStorage
+} from "~/utils/civic-storage-privacy";
 import { buildLookupContextState, deriveCivicLookupStateUpdate } from "~/utils/nationwide-results";
 
 const civicStorageKey = "ballot-clarity:civic-store";
@@ -35,15 +39,6 @@ function defaultSnapshot(): CivicStoreSnapshot {
 		selectedIssues: [],
 		selectedLocation: null
 	};
-}
-
-function sanitizeLocationSelection(location: LocationSelection | null) {
-	if (!location)
-		return null;
-
-	const { lookupInput: _lookupInput, ...safeLocation } = location;
-
-	return safeLocation;
 }
 
 export function normalizeCompareSlugs(slugs: readonly string[]) {
@@ -117,7 +112,9 @@ function readSnapshot(): CivicStoreSnapshot {
 		return {
 			...defaultSnapshot(),
 			...parsed,
-			ballotPlan: parsed.ballotPlan ?? {}
+			ballotPlan: parsed.ballotPlan ?? {},
+			nationwideLookupResult: sanitizeNationwideLookupResultForStorage(parsed.nationwideLookupResult),
+			selectedLocation: sanitizeLocationSelectionForStorage(parsed.selectedLocation)
 		};
 	}
 	catch {
@@ -176,7 +173,8 @@ export const useCivicStore = defineStore("civic", {
 				: null;
 			this.selectedElection = snapshot.selectedElection;
 			this.selectedIssues = snapshot.selectedIssues;
-			this.selectedLocation = sanitizeLocationSelection(snapshot.selectedLocation);
+			this.selectedLocation = sanitizeLocationSelectionForStorage(snapshot.selectedLocation);
+			this.persist();
 		},
 		markHydrated() {
 			this.isHydrated = true;
@@ -190,10 +188,10 @@ export const useCivicStore = defineStore("civic", {
 				ballotViewMode: this.ballotViewMode,
 				compareList: this.compareList,
 				lookupContext: this.lookupContext,
-				nationwideLookupResult: this.nationwideLookupResult,
+				nationwideLookupResult: sanitizeNationwideLookupResultForStorage(this.nationwideLookupResult),
 				selectedElection: this.selectedElection,
 				selectedIssues: this.selectedIssues,
-				selectedLocation: sanitizeLocationSelection(this.selectedLocation)
+				selectedLocation: sanitizeLocationSelectionForStorage(this.selectedLocation)
 			} satisfies CivicStoreSnapshot));
 		},
 		removeFromCompare(slug: string) {
@@ -213,7 +211,7 @@ export const useCivicStore = defineStore("civic", {
 
 			this.lookupContext = update.lookupContext;
 			this.nationwideLookupResult = update.nationwideLookupResult;
-			this.selectedLocation = sanitizeLocationSelection(update.selectedLocation);
+			this.selectedLocation = sanitizeLocationSelectionForStorage(update.selectedLocation);
 
 			if (election)
 				this.selectedElection = election;
@@ -293,7 +291,7 @@ export const useCivicStore = defineStore("civic", {
 			);
 
 			this.selectedElection = election;
-			this.selectedLocation = sanitizeLocationSelection(location);
+			this.selectedLocation = sanitizeLocationSelectionForStorage(location);
 			this.nationwideLookupResult = shouldPreserveLookupResult ? this.nationwideLookupResult : null;
 			this.lookupContext = location && election
 				? {

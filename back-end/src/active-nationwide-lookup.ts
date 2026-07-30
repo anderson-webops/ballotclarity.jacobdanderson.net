@@ -16,7 +16,9 @@ import type {
 	Source,
 	TrustBullet,
 } from "./types/civic.js";
+import process from "node:process";
 import { classifyRepresentative } from "./representative-classification.js";
+import { openSecretJson, sealSecretJson } from "./secret-envelope.js";
 
 export interface ActiveNationwideLookupContext {
 	actions: LocationLookupAction[];
@@ -36,6 +38,7 @@ export interface ActiveNationwideLookupContext {
 
 export const activeNationwideLookupCookieName = "ballot-clarity-nationwide-lookup";
 const cookieMaxAgeSeconds = 60 * 60 * 24 * 7;
+const activeLookupCookiePurpose = "ballot-clarity:active-lookup-cookie:v1";
 const censusGeocoderDocsUrl = "https://geocoding.geo.census.gov/geocoder/Geocoding_Services_API.html";
 const openStatesUrl = "https://openstates.org";
 
@@ -480,7 +483,9 @@ function buildCookiePayload(context: ActiveNationwideLookupContext) {
 					context.location.requiresOfficialConfirmation ? 1 : 0,
 				]
 			: null,
-		q: context.normalizedAddress,
+		q: context.inputKind === "zip" && /^\d{5}$/u.test(context.normalizedAddress)
+			? context.normalizedAddress
+			: "",
 		r: context.result,
 		rm: context.representativeMatches.map(match => [
 			match.id,
@@ -974,28 +979,73 @@ export function buildActiveNationwideLookupContext(response: LocationLookupRespo
 	});
 }
 
-export function buildActiveNationwideLookupCookie(response: LocationLookupResponse) {
+export function buildActiveNationwideLookupCookie(
+	response: LocationLookupResponse,
+	secret = process.env.ACTIVE_LOOKUP_COOKIE_SECRET || ""
+) {
 	const context = buildActiveNationwideLookupContext(response);
 
-	if (!context)
-		return null;
-
-	return JSON.stringify(buildCookiePayload(context));
+	return context ? buildActiveNationwideLookupCookieFromContext(context, secret) : null;
 }
 
-export function readActiveNationwideLookupContext(cookieHeader: string | undefined) {
+export function buildActiveNationwideLookupCookieFromContext(
+	context: ActiveNationwideLookupContext,
+	secret = process.env.ACTIVE_LOOKUP_COOKIE_SECRET || ""
+) {
+	const sanitizedContext = sanitizeActiveNationwideLookupContext(context);
+
+	if (!sanitizedContext || !secret.trim())
+		return null;
+
+	return sealSecretJson(buildCookiePayload(sanitizedContext), secret, activeLookupCookiePurpose);
+}
+
+export function readActiveNationwideLookupContext(
+	cookieHeader: string | undefined,
+	secret = process.env.ACTIVE_LOOKUP_COOKIE_SECRET || ""
+) {
 	const cookies = parseCookieHeader(cookieHeader);
 	const rawValue = cookies[activeNationwideLookupCookieName];
 
-	if (!rawValue)
+	if (!rawValue || !secret.trim())
 		return null;
 
 	try {
-		return sanitizeActiveNationwideLookupContext(expandCompactCookiePayload(JSON.parse(decodeURIComponent(rawValue))));
+		const payload = openSecretJson(
+			decodeURIComponent(rawValue),
+			secret,
+			activeLookupCookiePurpose
+		);
+
+		return sanitizeActiveNationwideLookupContext(expandCompactCookiePayload(payload));
 	}
 	catch {
 		return null;
 	}
+}
+
+export function buildActiveNationwideLookupResponse(
+	context: ActiveNationwideLookupContext
+): LocationLookupResponse {
+	return {
+		actions: context.actions,
+		detectedFromIp: context.detectedFromIp,
+		districtMatches: context.districtMatches,
+		electionLogistics: context.electionLogistics,
+		electionSlug: context.electionSlug,
+		fromCache: false,
+		guideAvailability: context.guideAvailability,
+		guideContent: null,
+		inputKind: context.inputKind,
+		location: context.location ?? undefined,
+		lookupQuery: context.normalizedAddress,
+		normalizedAddress: context.normalizedAddress,
+		note: "Saved civic results are active for this browser.",
+		representativeMatches: context.representativeMatches,
+		result: "resolved",
+		selectionId: context.selectionId,
+		selectionOptions: [],
+	};
 }
 
 export function clearActiveNationwideLookupCookie(response: {
@@ -1003,7 +1053,8 @@ export function clearActiveNationwideLookupCookie(response: {
 }) {
 	response.clearCookie(activeNationwideLookupCookieName, {
 		path: "/",
-		sameSite: "lax",
+		sameSite: "strict",
+		secure: process.env.NODE_ENV === "production",
 	});
 }
 
@@ -1011,10 +1062,11 @@ export function persistActiveNationwideLookupCookie(response: {
 	cookie: (name: string, value: string, options?: Record<string, unknown>) => void;
 }, value: string) {
 	response.cookie(activeNationwideLookupCookieName, value, {
-		httpOnly: false,
+		httpOnly: true,
 		maxAge: cookieMaxAgeSeconds * 1000,
 		path: "/",
-		sameSite: "lax",
+		sameSite: "strict",
+		secure: process.env.NODE_ENV === "production",
 	});
 }
 

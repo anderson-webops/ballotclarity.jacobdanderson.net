@@ -659,6 +659,16 @@ export function evaluateProductionConfig({
 	checkSecret({ errors, key: "ADMIN_SESSION_SECRET", value: env.ADMIN_SESSION_SECRET });
 	checkSecret({
 		errors,
+		key: "ACTIVE_LOOKUP_COOKIE_SECRET",
+		value: env.ACTIVE_LOOKUP_COOKIE_SECRET,
+	});
+	checkSecret({
+		errors,
+		key: "ADDRESS_CACHE_ENCRYPTION_KEY",
+		value: env.ADDRESS_CACHE_ENCRYPTION_KEY,
+	});
+	checkSecret({
+		errors,
 		key: "CONTACT_ADDRESS_SESSION_SECRET",
 		value: env.CONTACT_ADDRESS_SESSION_SECRET || env.NUXT_CONTACT_ADDRESS_SESSION_SECRET,
 	});

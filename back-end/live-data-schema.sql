@@ -110,8 +110,10 @@ CREATE TABLE IF NOT EXISTS citation_links (
 CREATE TABLE IF NOT EXISTS address_lookups (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	input_hash TEXT NOT NULL UNIQUE,
-	normalized_address TEXT NOT NULL,
-	zip5 TEXT NOT NULL,
+	encrypted_payload TEXT,
+	expires_at TIMESTAMPTZ,
+	normalized_address TEXT,
+	zip5 TEXT,
 	state TEXT,
 	county_fips TEXT,
 	latitude DOUBLE PRECISION,

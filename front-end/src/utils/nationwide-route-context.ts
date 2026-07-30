@@ -9,6 +9,8 @@ type QueryCarrier = {
 	lookupQuery?: string;
 	selectionId?: string;
 } | null | undefined;
+const exactZipPattern = /^\d{5}$/u;
+const selectionIdPattern = /^\w[\w.:-]{0,255}$/u;
 
 function readTrimmedQueryValue(value: unknown) {
 	if (Array.isArray(value))
@@ -21,10 +23,10 @@ export function extractNationwideLookupRouteQuery(query: Record<string, unknown>
 	const lookup = readTrimmedQueryValue(query?.lookup);
 	const selection = readTrimmedQueryValue(query?.selection);
 
-	if (!lookup)
+	if (!exactZipPattern.test(lookup))
 		return null;
 
-	return selection
+	return selectionIdPattern.test(selection)
 		? { lookup, selection }
 		: { lookup };
 }
@@ -41,10 +43,10 @@ export function buildNationwideLookupRouteQuery(
 	const lookup = context?.lookupQuery?.trim();
 	const selection = context?.selectionId?.trim();
 
-	if (!lookup)
+	if (!lookup || !exactZipPattern.test(lookup))
 		return undefined;
 
-	return selection
+	return selection && selectionIdPattern.test(selection)
 		? { lookup, selection }
 		: { lookup };
 }

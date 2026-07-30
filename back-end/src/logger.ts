@@ -14,6 +14,22 @@ const levelWeight: Record<LogLevel, number> = {
 	info: 20,
 	warn: 30
 };
+const requestIdPattern = /^\w[\w.:-]{0,127}$/u;
+
+export function normalizeRequestId(value: string | null | undefined) {
+	const candidate = value?.trim() ?? "";
+	return requestIdPattern.test(candidate) ? candidate : randomUUID();
+}
+
+export function sanitizeLogText(value: string | null | undefined, maximumLength: number) {
+	return Array.from(value ?? "", (character) => {
+		const codePoint = character.codePointAt(0) ?? 0;
+		return codePoint <= 31 || codePoint === 127 ? " " : character;
+	})
+		.join("")
+		.trim()
+		.slice(0, maximumLength);
+}
 
 function resolveLogLevel() {
 	const configured = (process.env.LOG_LEVEL || "info").trim().toLowerCase() as LogLevel;
@@ -60,7 +76,7 @@ export function createLogger(service: string) {
 export function createRequestLoggingMiddleware(logger: ReturnType<typeof createLogger>) {
 	return function requestLoggingMiddleware(request: Request, response: Response, next: NextFunction) {
 		const startedAt = Date.now();
-		const requestId = request.header("x-request-id") || randomUUID();
+		const requestId = normalizeRequestId(request.header("x-request-id"));
 
 		response.setHeader("x-request-id", requestId);
 		response.locals.requestId = requestId;
@@ -70,10 +86,10 @@ export function createRequestLoggingMiddleware(logger: ReturnType<typeof createL
 				durationMs: Date.now() - startedAt,
 				ip: request.ip,
 				method: request.method,
-				path: request.originalUrl,
+				path: sanitizeLogText(request.path, 512),
 				requestId,
 				statusCode: response.statusCode,
-				userAgent: request.get("user-agent") || ""
+				userAgent: sanitizeLogText(request.get("user-agent"), 256)
 			});
 		});
 

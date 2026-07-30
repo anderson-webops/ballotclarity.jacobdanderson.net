@@ -3,9 +3,8 @@ import type { RepresentativesResponse } from "~/types/civic";
 import { storeToRefs } from "pinia";
 
 import { buildActiveLookupSummary } from "~/utils/active-lookup";
-import { activeNationwideLookupCookieName, parseActiveNationwideLookupCookie } from "~/utils/active-nationwide-cookie";
 import { isExternalHref } from "~/utils/link";
-import { buildNationwideDirectoryResponses } from "~/utils/nationwide-directory";
+import { buildNationwideDirectoryResponses, mergeNationwideDirectoryResponses } from "~/utils/nationwide-directory";
 import { buildLookupContextFromNationwideResult, buildNationwideLookupRouteQuery, buildNationwideRouteTarget } from "~/utils/nationwide-route-context";
 import { groupRepresentativeSummariesByGovernmentLevel, resolveRepresentativePresentation } from "~/utils/representative-presentation";
 import { formatSourceCountLabel } from "~/utils/source-label";
@@ -14,9 +13,7 @@ const route = useRoute();
 const civicStore = useCivicStore();
 const { isHydrated, nationwideLookupResult, selectedLocation } = storeToRefs(civicStore);
 const { hasGuideShellContext, hasNationwideResultContext } = useGuideEntryGate();
-const activeNationwideLookupCookie = useCookie<string | null>(activeNationwideLookupCookieName);
-const serverNationwideLookupResult = computed(() => parseActiveNationwideLookupCookie(activeNationwideLookupCookie.value));
-const activeNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : serverNationwideLookupResult.value);
+const activeNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : null);
 const activeLookupQuery = computed(() => buildNationwideLookupRouteQuery(
 	buildLookupContextFromNationwideResult(activeNationwideLookupResult.value),
 	route.query
@@ -50,11 +47,18 @@ const storeUsesNationwide = computed(() => {
 });
 const directoryUsesNationwide = computed(() => apiUsesNationwide.value || storeUsesNationwide.value);
 const directoryBundle = computed(() => {
+	if (storeUsesNationwide.value) {
+		const storedDirectory = buildNationwideDirectoryResponses(activeNationwideLookupResult.value);
+
+		return apiUsesNationwide.value
+			? mergeNationwideDirectoryResponses(storedDirectory, {
+				representatives: guideData.value
+			}).representatives
+			: storedDirectory.representatives;
+	}
+
 	if (apiUsesNationwide.value)
 		return guideData.value ?? emptyNationwideRepresentativesResponse;
-
-	if (storeUsesNationwide.value)
-		return buildNationwideDirectoryResponses(activeNationwideLookupResult.value).representatives;
 
 	if (showGuideDirectory.value)
 		return guideData.value ?? emptyGuideRepresentativesResponse;

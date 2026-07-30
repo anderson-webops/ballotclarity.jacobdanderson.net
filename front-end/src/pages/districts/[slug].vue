@@ -2,7 +2,6 @@
 import { storeToRefs } from "pinia";
 
 import { buildActiveLookupSummary } from "~/utils/active-lookup";
-import { activeNationwideLookupCookieName, parseActiveNationwideLookupCookie } from "~/utils/active-nationwide-cookie";
 import { buildGuideDistrictPageRecord, buildNationwideDistrictPageRecord } from "~/utils/district-page";
 import { isExternalHref } from "~/utils/link";
 import { buildLookupContextFromNationwideResult, buildNationwideLookupRouteQuery, buildNationwideRouteTarget } from "~/utils/nationwide-route-context";
@@ -13,9 +12,7 @@ const civicStore = useCivicStore();
 const { isHydrated, nationwideLookupResult, selectedLocation } = storeToRefs(civicStore);
 const { hasGuideShellContext, hasNationwideResultContext } = useGuideEntryGate();
 const districtSlug = useRouteStringParam("slug");
-const activeNationwideLookupCookie = useCookie<string | null>(activeNationwideLookupCookieName);
-const serverNationwideLookupResult = computed(() => parseActiveNationwideLookupCookie(activeNationwideLookupCookie.value));
-const activeNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : serverNationwideLookupResult.value);
+const activeNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : null);
 const activeLookupQuery = computed(() => buildNationwideLookupRouteQuery(
 	buildLookupContextFromNationwideResult(activeNationwideLookupResult.value),
 	route.query

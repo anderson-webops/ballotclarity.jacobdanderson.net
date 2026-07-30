@@ -6,32 +6,41 @@ import {
 	normalizeAddressCacheInput,
 } from "../src/address-cache-repository.js";
 
+const encryptionKey = "test-address-cache-encryption-key-that-is-long-enough";
+
 test("address cache input normalization ignores whitespace and casing differences", () => {
 	assert.equal(
 		normalizeAddressCacheInput("  55   Trinity Ave SW,\nAtlanta, GA 30303  "),
 		"55 trinity ave sw, atlanta, ga 30303",
 	);
 	assert.equal(
-		hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303"),
-		hashAddressCacheInput("  55   TRINITY ave sw,\nAtlanta, ga 30303  "),
+		hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303", encryptionKey),
+		hashAddressCacheInput("  55   TRINITY ave sw,\nAtlanta, ga 30303  ", encryptionKey),
 	);
 });
 
-test("address cache input hashing keeps distinct lookup inputs distinct", () => {
+test("address cache input hashing is keyed and keeps distinct lookup inputs distinct", () => {
 	assert.notEqual(
-		hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303"),
-		hashAddressCacheInput("5600 Campbellton Fairburn Rd, Fairburn, GA 30213"),
+		hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303", encryptionKey),
+		hashAddressCacheInput("5600 Campbellton Fairburn Rd, Fairburn, GA 30213", encryptionKey),
 	);
-	assert.match(hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303"), /^[a-f0-9]{64}$/u);
+	assert.notEqual(
+		hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303", encryptionKey),
+		hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303", "another-address-cache-secret"),
+	);
+	assert.match(hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303", encryptionKey), /^[a-f0-9]{64}$/u);
+	assert.throws(() => hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303", ""));
 });
 
-test("address cache repository safely disables persistence when no database URL is configured", async () => {
-	const repository = await createAddressCacheRepository("");
+test("address cache repository safely disables persistence without both database and encryption configuration", async () => {
+	const noDatabaseRepository = await createAddressCacheRepository("", encryptionKey);
+	const noEncryptionRepository = await createAddressCacheRepository("postgres://unused", "");
 
-	assert.equal(repository.driver, "none");
-	assert.equal(await repository.getByInput("55 Trinity Ave SW, Atlanta, GA 30303"), null);
+	assert.equal(noDatabaseRepository.driver, "none");
+	assert.equal(noEncryptionRepository.driver, "none");
+	assert.equal(await noDatabaseRepository.getByInput("55 Trinity Ave SW, Atlanta, GA 30303"), null);
 
-	await assert.doesNotReject(repository.save("55 Trinity Ave SW, Atlanta, GA 30303", {
+	await assert.doesNotReject(noDatabaseRepository.save("55 Trinity Ave SW, Atlanta, GA 30303", {
 		benchmark: "Public_AR_Current",
 		districtMatches: [],
 		normalizedAddress: "55 TRINITY AVE SW, ATLANTA, GA, 30303",

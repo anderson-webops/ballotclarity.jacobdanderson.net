@@ -2,7 +2,6 @@
 import type { DistrictsResponse, RepresentativesResponse } from "~/types/civic";
 import { storeToRefs } from "pinia";
 import { buildActiveLookupSummary } from "~/utils/active-lookup";
-import { activeNationwideLookupCookieName, parseActiveNationwideLookupCookie } from "~/utils/active-nationwide-cookie";
 import { buildDistrictRepresentativeAvailabilityNote, buildDistrictRepresentativeCountLabel } from "~/utils/district-availability";
 import {
 	buildDistrictRepresentativeBadgeHref,
@@ -10,7 +9,7 @@ import {
 	buildDistrictRepresentativePopoverLinks
 } from "~/utils/district-directory-links";
 import { isExternalHref } from "~/utils/link";
-import { buildNationwideDirectoryResponses } from "~/utils/nationwide-directory";
+import { buildNationwideDirectoryResponses, mergeNationwideDirectoryResponses } from "~/utils/nationwide-directory";
 import { buildLookupContextFromNationwideResult, buildNationwideLookupRouteQuery, buildNationwideRouteTarget } from "~/utils/nationwide-route-context";
 import { resolveRepresentativePresentation } from "~/utils/representative-presentation";
 
@@ -18,9 +17,7 @@ const route = useRoute();
 const civicStore = useCivicStore();
 const { isHydrated, nationwideLookupResult, selectedLocation } = storeToRefs(civicStore);
 const { hasGuideShellContext, hasNationwideResultContext } = useGuideEntryGate();
-const activeNationwideLookupCookie = useCookie<string | null>(activeNationwideLookupCookieName);
-const serverNationwideLookupResult = computed(() => parseActiveNationwideLookupCookie(activeNationwideLookupCookie.value));
-const activeNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : serverNationwideLookupResult.value);
+const activeNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : null);
 const activeLookupQuery = computed(() => buildNationwideLookupRouteQuery(
 	buildLookupContextFromNationwideResult(activeNationwideLookupResult.value),
 	route.query
@@ -59,15 +56,21 @@ const storeUsesNationwide = computed(() => {
 const directoryUsesNationwide = computed(() => apiUsesNationwide.value || storeUsesNationwide.value);
 const nationwideDirectory = computed(() => buildNationwideDirectoryResponses(activeNationwideLookupResult.value));
 const directoryData = computed(() => {
+	if (storeUsesNationwide.value) {
+		return apiUsesNationwide.value
+			? mergeNationwideDirectoryResponses(nationwideDirectory.value, {
+					districts: guideDistrictData.value,
+					representatives: guideRepresentativesData.value
+				})
+			: nationwideDirectory.value;
+	}
+
 	if (apiUsesNationwide.value) {
 		return {
 			districts: guideDistrictData.value ?? emptyNationwideDistrictsResponse,
 			representatives: guideRepresentativesData.value ?? emptyNationwideRepresentativesResponse
 		};
 	}
-
-	if (storeUsesNationwide.value)
-		return nationwideDirectory.value;
 
 	return {
 		districts: showGuideDirectory.value ? guideDistrictData.value ?? emptyGuideDistrictsResponse : emptyNationwideDistrictsResponse,

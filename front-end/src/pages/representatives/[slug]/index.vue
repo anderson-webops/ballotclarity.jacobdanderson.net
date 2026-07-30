@@ -2,7 +2,6 @@
 import type { PersonProfileResponse, Source } from "~/types/civic";
 import { storeToRefs } from "pinia";
 
-import { activeNationwideLookupCookieName, parseActiveNationwideLookupCookie } from "~/utils/active-nationwide-cookie";
 import { buildNationwidePersonProfileResponse } from "~/utils/nationwide-person-profile";
 import { buildLookupContextFromNationwideResult, buildNationwideLookupRouteQuery, buildNationwideRouteTarget } from "~/utils/nationwide-route-context";
 import { hasPersonFunding, hasPersonInfluence } from "~/utils/person-profile";
@@ -15,9 +14,7 @@ const { isHydrated, nationwideLookupResult } = storeToRefs(civicStore);
 const representativeSlug = useRouteStringParam("slug");
 const { backToLayerLink, layerBreadcrumbLink, overviewLink } = useRouteLayerNavigation();
 const { formatCurrency, formatDate, formatDateTime, formatPercent } = useFormatters();
-const activeNationwideLookupCookie = useCookie<string | null>(activeNationwideLookupCookieName);
-const serverNationwideLookupResult = computed(() => parseActiveNationwideLookupCookie(activeNationwideLookupCookie.value));
-const activeNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : serverNationwideLookupResult.value);
+const activeNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : null);
 const activeLookupQuery = computed(() => buildNationwideLookupRouteQuery(
 	buildLookupContextFromNationwideResult(activeNationwideLookupResult.value),
 	route.query

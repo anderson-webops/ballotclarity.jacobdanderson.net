@@ -114,6 +114,8 @@ function writeSnapshot(
 
 function buildProductionEnv(overrides: Record<string, string | undefined> = {}) {
 	return {
+		ACTIVE_LOOKUP_COOKIE_SECRET: "d".repeat(48),
+		ADDRESS_CACHE_ENCRYPTION_KEY: "e".repeat(48),
 		ADMIN_API_BASE: "http://127.0.0.1:3001/api",
 		ADMIN_API_KEY: "a".repeat(48),
 		ADMIN_DATABASE_URL: "postgres://ballotclarity:secret@db.internal:5432/ballotclarity",
@@ -187,6 +189,8 @@ test("production config check fails placeholder public origins", () => {
 test("production config check fails sqlite admin persistence and weak secrets", () => {
 	const evaluation = evaluateProductionConfig({
 		env: buildProductionEnv({
+			ACTIVE_LOOKUP_COOKIE_SECRET: "short",
+			ADDRESS_CACHE_ENCRYPTION_KEY: "replace-with-an-address-cache-key",
 			ADMIN_API_KEY: "replace-with-a-long-random-internal-key",
 			ADMIN_DATABASE_URL: "",
 			ADMIN_SESSION_SECRET: "short",
@@ -195,6 +199,8 @@ test("production config check fails sqlite admin persistence and weak secrets", 
 	});
 
 	assert.equal(evaluation.ok, false);
+	assert.ok(issueIds(evaluation, "errors").includes("active_lookup_cookie_secret.short"));
+	assert.ok(issueIds(evaluation, "errors").includes("address_cache_encryption_key.weak"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_api_key.weak"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_session_secret.short"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_store.driver"));

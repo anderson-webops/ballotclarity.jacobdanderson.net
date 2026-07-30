@@ -9,7 +9,7 @@ It checks the environment values and active coverage snapshot that determine whe
 - Public origins use HTTPS and do not point at localhost, reserved placeholder domains, private IP ranges, or internal-only hostnames.
 - `NUXT_PUBLIC_API_BASE` points at the public `/api` path.
 - `ADMIN_API_BASE` is configured as a private server-side target, not the same public API base used by browsers.
-- `ADMIN_API_KEY` and `ADMIN_SESSION_SECRET` are present, long enough, and not obvious placeholder values.
+- `ADMIN_API_KEY`, `ADMIN_SESSION_SECRET`, `ACTIVE_LOOKUP_COOKIE_SECRET`, and `ADDRESS_CACHE_ENCRYPTION_KEY` are present, long enough, and not obvious placeholder values.
 - `CONTACT_ADDRESS` or `NUXT_CONTACT_ADDRESS` is configured as a valid, non-placeholder support email for the protected public contact route.
 - `CONTACT_ADDRESS_SESSION_SECRET` or `NUXT_CONTACT_ADDRESS_SESSION_SECRET` is present, long enough, and not an obvious placeholder value.
 - `NUXT_PUBLIC_OPERATOR_LEGAL_NAME`, `NUXT_PUBLIC_GOVERNING_LAW`, and `NUXT_PUBLIC_VENUE` are explicitly configured for production Terms and Privacy copy and do not contain placeholder text.
@@ -50,4 +50,4 @@ npm run verify:production -- --json
 
 This check does not replace full editorial content validation. It does provide a deploy-time backstop for the most dangerous snapshot states: production-eligible packages that are only empty shells, still carry reference-archive candidates, contain placeholder or internal URLs, contain staged guide markers, or expose mixed-content flags.
 
-This check verifies the runtime contract around that content: public origins, admin persistence, protected contact and legal-policy configuration, secret posture, throttle configuration, optional ballot-content provider and source-asset endpoint safety, live snapshot requirement, and snapshot provenance.
+This check verifies the runtime contract around that content: public origins, admin persistence, protected contact and legal-policy configuration, saved-lookup and address-cache encryption secrets, throttle configuration, optional ballot-content provider and source-asset endpoint safety, live snapshot requirement, and snapshot provenance.

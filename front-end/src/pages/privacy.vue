@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { analyticsTrackers, appName } from "~/constants";
 
-const effectiveAt = "2026-06-12T00:00:00-04:00";
+const effectiveAt = "2026-07-29T00:00:00-04:00";
 const runtimeConfig = useRuntimeConfig();
 const siteUrl = useSiteUrl();
 const currentOperatorName = String(runtimeConfig.public.operatorLegalName || "Jacob Anderson").trim();
@@ -21,14 +21,14 @@ const collectionSections = [
 			"That lookup may also trigger district matching, representative attachment, and official election verification using the civic data providers needed for the requested result.",
 			"If ZIP-only operational logging is enabled, Ballot Clarity may record only an exact 5-digit ZIP entered by itself as the lookup input. Full street addresses, ZIP+4 entries, city names, mixed address strings, provider-normalized ZIPs, raw lookup text, IP address, and user agent are not added to that ZIP-only log.",
 			"The site may also use coarse geolocation derived from request metadata to make an approximate default location guess before you enter anything manually.",
-			"The application is designed not to publish the raw lookup text in public content records and not to persist it in browser storage used for saved ballot preferences."
+			"The application is designed not to publish the raw lookup text in public content records. Exact street addresses and address-specific ballot previews or polling logistics are removed from durable browser storage; an exact 5-digit ZIP may be retained for ZIP-based navigation."
 		],
 		title: "Address or ZIP lookup input"
 	},
 	{
 		body: [
-			"The app stores selected location labels, compare selections, saved ballot-plan choices, issue filters, and reading mode in local browser storage so the guide remains usable across refreshes.",
-			"The site also sets first-party cookies for saved area results, display timezone, and private editorial access sessions.",
+			"The app stores public area labels and results, compare selections, saved ballot-plan choices, issue filters, and reading mode in local browser storage so the guide remains usable across refreshes. It strips exact street-address input, address-specific ballot previews, and address-specific polling logistics before writing that state.",
+			"The site also sets first-party cookies for saved area results, display timezone, and private editorial access sessions. The saved-area result cookie is authenticated ciphertext, is unavailable to browser scripts, and omits exact street-address input.",
 			"This browser-side state is tied to the browser on your device. Ballot Clarity does not maintain a public server-side user account for that state."
 		],
 		title: "Browser storage and cookies"
@@ -109,18 +109,25 @@ const sharingSections = [
 
 const retentionRows = [
 	{
-		access: "Runtime handling only during the request, plus transient processing by the lookup or verification provider that receives it.",
+		access: "Request-time handling, provider processing, and—when the encrypted cache is enabled—restricted backend access to authenticated ciphertext.",
 		category: "Raw ballot lookup input",
-		deletion: "The current app flow is designed to avoid adding the raw lookup string to published source records or saved browser state. Provider-side retention depends on the recipient's system and policy.",
-		retention: "Request-time processing in Ballot Clarity.",
+		deletion: "The current app flow avoids adding an exact street address to published source records, URLs, the saved-area cookie payload, or durable browser preference state. Encrypted backend cache records expire automatically; provider-side retention depends on the recipient's system and policy.",
+		retention: "Request-time processing, plus up to 7 days for encrypted normalized-address cache data when that optional backend cache is enabled.",
 		scope: "Street address or ZIP entered into the lookup."
 	},
 	{
-		access: "Stored in your browser on the current device.",
+		access: "Sent automatically to the backend as a first-party HttpOnly cookie; browser scripts cannot read it.",
 		category: "Saved lookup cookie",
 		deletion: "Clear browser cookies or submit a new lookup that replaces or clears the stored context.",
 		retention: "Up to 7 days.",
-		scope: "First-party cookie containing current area-result details such as normalized address or ZIP, matched districts, representative matches, official actions, and lookup timing."
+		scope: "Authenticated encrypted first-party cookie containing public area-result continuity details such as an exact 5-digit ZIP when applicable, matched districts, representative matches, official actions, and lookup timing. Exact street-address input is omitted."
+	},
+	{
+		access: "Restricted backend database access; the payload is stored as authenticated ciphertext and the lookup identifier is keyed.",
+		category: "Encrypted address lookup cache",
+		deletion: "Records expire automatically after 7 days and are deleted on later cache access or replacement. Legacy plaintext rows are removed during schema migration.",
+		retention: "Up to 7 days when the optional Postgres cache and its dedicated encryption key are configured.",
+		scope: "Provider-normalized address geography, district matches, representative matches, and lookup metadata needed to avoid repeating the same provider calls."
 	},
 	{
 		access: "Operational access only for reliability, coverage planning, and abuse monitoring.",
@@ -141,7 +148,7 @@ const retentionRows = [
 		category: "Saved guide preferences",
 		deletion: "Clear browser storage, use a private session, or overwrite the saved state.",
 		retention: "Until you clear it or replace it on your device.",
-		scope: "Selected location label, compare list, ballot plan, issue filters, reading mode, and related locally saved area-result details."
+		scope: "Selected public location label, compare list, ballot plan, issue filters, reading mode, and sanitized area-result details. Exact street addresses, address-specific ballot previews, and address-specific polling logistics are excluded."
 	},
 	{
 		access: "Stored in the editor's browser and private access-control layer.",
@@ -203,7 +210,7 @@ const childrenNotes = [
 const securityNotes = [
 	"Ballot Clarity aims to use reasonable administrative, technical, and organizational safeguards appropriate to the service.",
 	"Those safeguards are intended to reduce unnecessary data collection, limit retention, and protect the integrity of the service and its operational systems.",
-	"The service also uses staff login throttling, signed editorial-access session cookies, and structured request logging for reliability and abuse handling.",
+	"The service also uses staff login throttling, signed editorial-access session cookies, authenticated encryption for saved lookup continuity and optional address caching, and structured request logging that excludes URL query strings.",
 	"No internet service can guarantee absolute security. If the project's data practices or incident posture changes materially, this policy will be updated as well."
 ];
 

@@ -1,9 +1,10 @@
 import type { CensusAddressLookupResult } from "./census-geocoder.js";
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
+import { openSecretJson, sealSecretJson } from "./secret-envelope.js";
 
 export interface CachedAddressLookup extends CensusAddressLookupResult {
 	fromCache: true;
@@ -16,33 +17,27 @@ export interface AddressCacheRepository {
 }
 
 interface AddressLookupRow {
+	encrypted_payload: string | null;
 	id: string;
-	normalized_address: string;
-	zip5: string;
-	state: string | null;
-	county_fips: string | null;
-	latitude: number | null;
-	longitude: number | null;
-	census_benchmark: string;
-	census_vintage: string;
-}
-
-interface DistrictAssignmentRow {
-	district_type: string;
-	district_code: string;
-	district_label: string;
-	source_system: string;
 }
 
 const packagedSchemaPath = new URL("./live-data-schema.sql", import.meta.url);
 const sourceSchemaPath = new URL("../live-data-schema.sql", import.meta.url);
+const addressCacheEncryptionPurpose = "ballot-clarity:address-cache:v1";
+const addressCacheHashPurpose = "ballot-clarity:address-cache-input:v1";
+const addressCacheRetentionMs = 7 * 24 * 60 * 60 * 1000;
 
 export function normalizeAddressCacheInput(input: string) {
 	return input.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-export function hashAddressCacheInput(input: string) {
-	return createHash("sha256").update(normalizeAddressCacheInput(input)).digest("hex");
+export function hashAddressCacheInput(input: string, secret: string) {
+	if (!secret.trim())
+		throw new Error("Address cache encryption key is required.");
+
+	return createHmac("sha256", secret)
+		.update(`${addressCacheHashPurpose}\0${normalizeAddressCacheInput(input)}`)
+		.digest("hex");
 }
 
 function resolveSchemaPath() {
@@ -54,137 +49,116 @@ function resolveSchemaPath() {
 	return fileURLToPath(sourceSchemaPath);
 }
 
-function mapCachedLookup(row: AddressLookupRow, districtRows: DistrictAssignmentRow[]): CachedAddressLookup {
-	const districtMatches = districtRows.map(item => ({
-		districtCode: item.district_code,
-		districtType: item.district_type,
-		id: `${item.district_type}:${item.district_code}`,
-		label: item.district_label,
-		sourceSystem: item.source_system
-	})).sort((left, right) => left.districtType.localeCompare(right.districtType) || left.label.localeCompare(right.label));
+function mapCachedLookup(row: AddressLookupRow, encryptionKey: string): CachedAddressLookup {
+	if (!row.encrypted_payload)
+		throw new Error("Encrypted address cache record is missing.");
+
+	const lookup = openSecretJson<CensusAddressLookupResult>(
+		row.encrypted_payload,
+		encryptionKey,
+		addressCacheEncryptionPurpose
+	);
+
+	if (
+		!lookup
+		|| typeof lookup.benchmark !== "string"
+		|| typeof lookup.normalizedAddress !== "string"
+		|| typeof lookup.vintage !== "string"
+		|| !Array.isArray(lookup.districtMatches)
+	) {
+		throw new Error("Encrypted address cache record is invalid.");
+	}
 
 	return {
-		benchmark: row.census_benchmark,
-		countyFips: row.county_fips || undefined,
-		districtMatches,
+		...lookup,
 		fromCache: true,
-		latitude: row.latitude ?? undefined,
-		longitude: row.longitude ?? undefined,
-		normalizedAddress: row.normalized_address,
-		state: row.state || undefined,
-		vintage: row.census_vintage,
-		zip5: row.zip5
 	};
 }
 
-async function createPostgresAddressCacheRepository(databaseUrl: string): Promise<AddressCacheRepository> {
+async function createPostgresAddressCacheRepository(databaseUrl: string, encryptionKey: string): Promise<AddressCacheRepository> {
 	const pool = new Pool({
 		connectionString: databaseUrl
 	});
 
 	await pool.query(readFileSync(resolveSchemaPath(), "utf8"));
-	await pool.query("ALTER TABLE district_assignments ADD COLUMN IF NOT EXISTS district_label TEXT");
-	await pool.query("UPDATE district_assignments SET district_label = COALESCE(NULLIF(district_label, ''), district_code)");
-	await pool.query("ALTER TABLE district_assignments ALTER COLUMN district_label SET NOT NULL");
+	await pool.query(`
+		ALTER TABLE address_lookups ADD COLUMN IF NOT EXISTS encrypted_payload TEXT;
+		ALTER TABLE address_lookups ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+		ALTER TABLE address_lookups ALTER COLUMN normalized_address DROP NOT NULL;
+		ALTER TABLE address_lookups ALTER COLUMN zip5 DROP NOT NULL;
+		DELETE FROM address_lookups
+		WHERE encrypted_payload IS NULL OR expires_at IS NULL;
+		CREATE INDEX IF NOT EXISTS idx_address_lookups_expires_at ON address_lookups(expires_at);
+	`);
 
 	return {
 		driver: "postgres",
 		async getByInput(input) {
-			const inputHash = hashAddressCacheInput(input);
+			const inputHash = hashAddressCacheInput(input, encryptionKey);
+			await pool.query("DELETE FROM address_lookups WHERE expires_at <= NOW()");
 			const lookupResult = await pool.query<AddressLookupRow>(`
-				SELECT id, normalized_address, zip5, state, county_fips, latitude, longitude, census_benchmark, census_vintage
+				SELECT id, encrypted_payload
 				FROM address_lookups
-				WHERE input_hash = $1
+				WHERE input_hash = $1 AND expires_at > NOW()
 			`, [inputHash]);
 			const row = lookupResult.rows[0];
 
 			if (!row)
 				return null;
 
-			const districtResult = await pool.query<DistrictAssignmentRow>(`
-				SELECT district_type, district_code, district_label, source_system
-				FROM district_assignments
-				WHERE address_lookup_id = $1
-				ORDER BY district_type ASC, district_code ASC
-			`, [row.id]);
-
-			return mapCachedLookup(row, districtResult.rows);
+			try {
+				return mapCachedLookup(row, encryptionKey);
+			}
+			catch {
+				await pool.query("DELETE FROM address_lookups WHERE id = $1", [row.id]);
+				return null;
+			}
 		},
 		async save(input, lookup) {
-			const inputHash = hashAddressCacheInput(input);
-			const connection = await pool.connect();
+			const inputHash = hashAddressCacheInput(input, encryptionKey);
+			const encryptedPayload = sealSecretJson(lookup, encryptionKey, addressCacheEncryptionPurpose);
 
-			try {
-				await connection.query("BEGIN");
-
-				const lookupResult = await connection.query<{ id: string }>(`
-					INSERT INTO address_lookups (
-						input_hash, normalized_address, zip5, state, county_fips, latitude, longitude, census_benchmark, census_vintage, updated_at
-					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-					ON CONFLICT (input_hash) DO UPDATE
-					SET normalized_address = EXCLUDED.normalized_address,
-						zip5 = EXCLUDED.zip5,
-						state = EXCLUDED.state,
-						county_fips = EXCLUDED.county_fips,
-						latitude = EXCLUDED.latitude,
-						longitude = EXCLUDED.longitude,
-						census_benchmark = EXCLUDED.census_benchmark,
-						census_vintage = EXCLUDED.census_vintage,
-						updated_at = NOW()
-					RETURNING id
-				`, [
-					inputHash,
-					lookup.normalizedAddress,
-					lookup.zip5 || "",
-					lookup.state || null,
-					lookup.countyFips || null,
-					lookup.latitude ?? null,
-					lookup.longitude ?? null,
-					lookup.benchmark,
-					lookup.vintage
-				]);
-
-				const lookupId = lookupResult.rows[0]?.id;
-
-				if (!lookupId)
-					throw new Error("Unable to persist address lookup cache record.");
-
-				await connection.query(`
-					DELETE FROM district_assignments
-					WHERE address_lookup_id = $1
-				`, [lookupId]);
-
-				for (const district of lookup.districtMatches) {
-					await connection.query(`
-						INSERT INTO district_assignments (
-							address_lookup_id, district_type, district_code, district_label, source_system, effective_date
-						) VALUES ($1, $2, $3, $4, $5, CURRENT_DATE)
-					`, [
-						lookupId,
-						district.districtType,
-						district.districtCode,
-						district.label,
-						district.sourceSystem
-					]);
-				}
-
-				await connection.query("COMMIT");
-			}
-			catch (error) {
-				await connection.query("ROLLBACK");
-				throw error;
-			}
-			finally {
-				connection.release();
-			}
+			await pool.query("DELETE FROM address_lookups WHERE expires_at <= NOW()");
+			await pool.query(`
+				INSERT INTO address_lookups (
+					input_hash,
+					encrypted_payload,
+					expires_at,
+					normalized_address,
+					zip5,
+					state,
+					county_fips,
+					latitude,
+					longitude,
+					census_benchmark,
+					census_vintage,
+					updated_at
+				) VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 millisecond'), NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NOW())
+				ON CONFLICT (input_hash) DO UPDATE
+				SET encrypted_payload = EXCLUDED.encrypted_payload,
+					expires_at = EXCLUDED.expires_at,
+					normalized_address = NULL,
+					zip5 = NULL,
+					state = NULL,
+					county_fips = NULL,
+					latitude = NULL,
+					longitude = NULL,
+					census_benchmark = NULL,
+					census_vintage = NULL,
+					updated_at = NOW()
+			`, [inputHash, encryptedPayload, addressCacheRetentionMs]);
 		}
 	};
 }
 
-export async function createAddressCacheRepository(databaseUrl = process.env.ADMIN_DATABASE_URL || process.env.DATABASE_URL || ""): Promise<AddressCacheRepository> {
+export async function createAddressCacheRepository(
+	databaseUrl = process.env.ADMIN_DATABASE_URL || process.env.DATABASE_URL || "",
+	encryptionKey = process.env.ADDRESS_CACHE_ENCRYPTION_KEY || ""
+): Promise<AddressCacheRepository> {
 	const resolvedDatabaseUrl = databaseUrl.trim();
+	const resolvedEncryptionKey = encryptionKey.trim();
 
-	if (!resolvedDatabaseUrl) {
+	if (!resolvedDatabaseUrl || !resolvedEncryptionKey) {
 		return {
 			driver: "none",
 			async getByInput() {
@@ -194,5 +168,5 @@ export async function createAddressCacheRepository(databaseUrl = process.env.ADM
 		};
 	}
 
-	return await createPostgresAddressCacheRepository(resolvedDatabaseUrl);
+	return await createPostgresAddressCacheRepository(resolvedDatabaseUrl, resolvedEncryptionKey);
 }

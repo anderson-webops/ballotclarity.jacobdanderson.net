@@ -2,7 +2,6 @@
 import type { LocationLookupResponse, LocationLookupSelectionOption } from "~/types/civic";
 import { storeToRefs } from "pinia";
 import { buildActiveLookupSummary } from "~/utils/active-lookup";
-import { activeNationwideLookupCookieName, parseActiveNationwideLookupCookie } from "~/utils/active-nationwide-cookie";
 import { buildLocationGuessUiContent } from "~/utils/location-guess";
 import { buildPublishedGuideDestination } from "~/utils/location-lookup";
 import { normalizeLookupResponseForDisplay, resolveLookupDestination } from "~/utils/nationwide-results";
@@ -13,13 +12,25 @@ const route = useRoute();
 const civicStore = useCivicStore();
 const { data: coverageData } = useCoverage();
 const { isHydrated, nationwideLookupResult } = storeToRefs(civicStore);
-const activeNationwideLookupCookie = useCookie<string | null>(activeNationwideLookupCookieName);
-const serverNationwideLookupResult = computed(() => parseActiveNationwideLookupCookie(activeNationwideLookupCookie.value));
-const storedNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : serverNationwideLookupResult.value);
+const storedNationwideLookupResult = computed(() => isHydrated.value ? nationwideLookupResult.value : null);
 const activeLookupQuery = computed(() => buildNationwideLookupRouteQuery(
 	buildLookupContextFromNationwideResult(storedNationwideLookupResult.value),
 	route.query
 ));
+const { data: savedLookupResult } = await useAsyncData(
+	"results:saved-active-lookup",
+	async () => {
+		if (activeLookupQuery.value?.lookup)
+			return null;
+
+		const response = await api<LocationLookupResponse | null>("/location/active");
+		return response ? normalizeLookupResponseForDisplay(response, null) : null;
+	},
+	{
+		default: () => null,
+		watch: [activeLookupQuery]
+	}
+);
 const { data: routeLookupResult } = await useAsyncData(
 	() => `results:lookup:${activeLookupQuery.value?.lookup ?? "none"}:${activeLookupQuery.value?.selection ?? "none"}`,
 	async () => {
@@ -41,7 +52,11 @@ const { data: routeLookupResult } = await useAsyncData(
 		watch: [activeLookupQuery, storedNationwideLookupResult]
 	}
 );
-const activeResult = computed(() => storedNationwideLookupResult.value ?? routeLookupResult.value);
+const activeResult = computed(() =>
+	storedNationwideLookupResult.value
+	?? routeLookupResult.value
+	?? savedLookupResult.value
+);
 const shouldShowResultsSkeleton = computed(() => !activeResult.value && !isHydrated.value && Boolean(activeLookupQuery.value?.lookup));
 const activeLookupSummary = computed(() => buildActiveLookupSummary({
 	nationwideLookupResult: activeResult.value,

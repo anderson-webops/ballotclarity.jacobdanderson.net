@@ -23,7 +23,7 @@ const browserLaunchTimeoutMs = Number(process.env.A11Y_BROWSER_LAUNCH_TIMEOUT_MS
 const pageTimeoutMs = Number(process.env.A11Y_PAGE_TIMEOUT_MS || 45_000);
 const baseUrl = `http://127.0.0.1:${frontendPort}`;
 const apiUrl = `http://127.0.0.1:${apiPort}/api`;
-const routes = [
+const defaultRoutes = [
 	"/",
 	"/ballot/2026-fulton-county-general",
 	"/elections/2026-fulton-county-general",
@@ -49,6 +49,12 @@ const routes = [
 	"/compare",
 	"/search"
 ];
+const routes = process.env.A11Y_ROUTES
+	? process.env.A11Y_ROUTES
+			.split(",")
+			.map(route => route.trim())
+			.filter(Boolean)
+	: defaultRoutes;
 const colorSchemes = (process.env.A11Y_COLOR_SCHEMES || "light,dark")
 	.split(",")
 	.map(scheme => scheme.trim())

@@ -1,7 +1,7 @@
-import type { NationwideLookupResultContext } from "../src/types/civic.ts";
+import type { NationwideLookupResultContext, RepresentativesResponse } from "../src/types/civic.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildNationwideDirectoryResponses } from "../src/utils/nationwide-directory.ts";
+import { buildNationwideDirectoryResponses, mergeNationwideDirectoryResponses } from "../src/utils/nationwide-directory.ts";
 
 const nationwideLookupResult = {
 	actions: [],
@@ -112,6 +112,56 @@ test("published guide context should keep guide directory behavior external to n
 	assert.equal(publishedGuideLookupResult.guideAvailability, "published");
 	assert.equal(buildNationwideDirectoryResponses(publishedGuideLookupResult).representatives.representatives.length, 2);
 	assert.equal(buildNationwideDirectoryResponses(publishedGuideLookupResult).districts.districts.length, 3);
+});
+
+test("nationwide directory merging keeps saved provider officials and reviewed API enrichment", () => {
+	const stored = buildNationwideDirectoryResponses(nationwideLookupResult);
+	const apiKeven = {
+		...stored.representatives.representatives[1],
+		sourceCount: 2,
+		summary: "Current reviewed API record"
+	};
+	const apiMarsha = {
+		...apiKeven,
+		districtLabel: "Provo city",
+		districtSlug: "state-house-60",
+		href: "/representatives/marsha-judkins",
+		name: "Marsha Judkins",
+		slug: "marsha-judkins"
+	};
+	const apiDistricts = stored.representatives.districts.map((district) => {
+		if (district.slug === "ut-cd-03")
+			return { ...district, href: "/districts/congressional-3", slug: "congressional-3" };
+
+		if (district.slug === "ut-house-60")
+			return { ...district, href: "/districts/state-house-60", slug: "state-house-60" };
+
+		return district;
+	});
+	const apiRepresentatives = {
+		...stored.representatives,
+		districts: apiDistricts,
+		representatives: [apiKeven, apiMarsha],
+		updatedAt: "2099-07-30T00:00:00.000Z"
+	} satisfies RepresentativesResponse;
+	const merged = mergeNationwideDirectoryResponses(stored, {
+		representatives: apiRepresentatives
+	});
+
+	assert.equal(merged.representatives.representatives.length, 3);
+	assert.ok(merged.representatives.representatives.some(representative => representative.slug === "john-curtis"));
+	assert.equal(
+		merged.representatives.representatives.find(representative => representative.slug === "keven-stratton")?.summary,
+		"Current reviewed API record"
+	);
+	assert.ok(merged.representatives.representatives.some(representative => representative.slug === "marsha-judkins"));
+	assert.equal(merged.districts.districts.length, 3);
+	assert.equal(
+		merged.representatives.representatives.find(representative => representative.slug === "john-curtis")?.districtSlug,
+		"congressional-3"
+	);
+	assert.equal(merged.districts.districts.find(district => district.slug === "state-house-60")?.representativeCount, 1);
+	assert.equal(merged.representatives.updatedAt, "2099-07-30T00:00:00.000Z");
 });
 
 test("nationwide directory canonical matching links mismatched provider labels to the same districts", () => {

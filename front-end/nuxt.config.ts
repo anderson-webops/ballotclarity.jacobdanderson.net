@@ -115,7 +115,7 @@ export default defineNuxtConfig({
 				...(isDev
 					? []
 					: analyticsTrackers.map(tracker => ({
-							"defer": true,
+							"async": true,
 							"key": `ballot-clarity-analytics-${tracker.label}`,
 							"src": `https://${tracker.domain}/script.js`,
 							"data-website-id": tracker.websiteId,

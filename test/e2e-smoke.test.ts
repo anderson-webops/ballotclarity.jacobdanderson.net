@@ -9,11 +9,11 @@ import { join } from "node:path";
 import process from "node:process";
 import test, { after, before } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { buildActiveNationwideLookupCookieFromContext } from "../back-end/src/active-nationwide-lookup.ts";
 import {
 	staleClientBuildStorageKey,
 	staleClientReloadKeyPrefix,
 } from "../front-end/src/utils/deploy-recovery.ts";
-import { buildActiveNationwideLookupCookieValue } from "../front-end/src/utils/active-nationwide-cookie.ts";
 
 const repoRoot = process.cwd();
 
@@ -25,6 +25,7 @@ const adminApiKey = "smoke-admin-key";
 const adminPassword = "smoke-password";
 const adminSessionSecret = "smoke-session-secret";
 const adminUsername = "smoke-admin";
+const activeLookupCookieSecret = "smoke-active-lookup-cookie-secret-that-is-long-enough";
 const e2eTempDir = mkdtempSync(join(tmpdir(), "ballot-clarity-e2e-"));
 const adminDbPath = join(e2eTempDir, "e2e-smoke.sqlite");
 const localCoverageFile = join(repoRoot, "back-end/data/live-coverage.local.json");
@@ -241,7 +242,12 @@ const guideShellOnlySnapshot = {
 	}
 };
 
-const activeNationwideLookupCookie = `${activeNationwideLookupCookieName}=${buildActiveNationwideLookupCookieValue(nationwideLookupSnapshot.nationwideLookupResult)}`;
+const activeNationwideLookupCookieValue = buildActiveNationwideLookupCookieFromContext(
+	nationwideLookupSnapshot.nationwideLookupResult as Parameters<typeof buildActiveNationwideLookupCookieFromContext>[0],
+	activeLookupCookieSecret
+);
+assert.ok(activeNationwideLookupCookieValue);
+const activeNationwideLookupCookie = `${activeNationwideLookupCookieName}=${activeNationwideLookupCookieValue}`;
 const easternDisplayTimeZoneCookie = `${displayTimeZoneCookieName}=America%2FNew_York`;
 
 async function getFreePort() {
@@ -374,7 +380,6 @@ interface CdpSession {
 	close: () => Promise<void>;
 	on: (method: string, handler: (params: any) => void) => () => void;
 	send: (method: string, params?: Record<string, unknown>) => Promise<any>;
-	waitForEvent: (method: string, predicate?: (params: any) => boolean, timeoutMs?: number) => Promise<any>;
 }
 
 async function connectToCdp(webSocketUrl: string): Promise<CdpSession> {
@@ -453,23 +458,6 @@ async function connectToCdp(webSocketUrl: string): Promise<CdpSession> {
 		});
 	}
 
-	function waitForEvent(method: string, predicate: (params: any) => boolean = () => true, timeoutMs = 10000) {
-		return new Promise<any>((resolve, reject) => {
-			const cleanup = on(method, (params) => {
-				if (!predicate(params))
-					return;
-
-				clearTimeout(timeoutId);
-				cleanup();
-				resolve(params);
-			});
-			const timeoutId = setTimeout(() => {
-				cleanup();
-				reject(new Error(`Timed out waiting for Chrome DevTools event ${method}.`));
-			}, timeoutMs);
-		});
-	}
-
 	async function close() {
 		if (socket.readyState === WebSocket.CLOSED)
 			return;
@@ -483,9 +471,108 @@ async function connectToCdp(webSocketUrl: string): Promise<CdpSession> {
 	return {
 		close,
 		on,
-		send,
-		waitForEvent
+		send
 	};
+}
+
+async function waitForRuntimeCondition(
+	cdp: CdpSession,
+	expression: string,
+	predicate: (value: unknown) => boolean,
+	label: string,
+	timeoutMs = 15000
+) {
+	const deadline = Date.now() + timeoutMs;
+	let lastValue: unknown = "runtime value unavailable";
+
+	while (Date.now() < deadline) {
+		try {
+			const evaluation = await cdp.send("Runtime.evaluate", {
+				awaitPromise: false,
+				expression,
+				returnByValue: true
+			});
+
+			if (evaluation.exceptionDetails)
+				throw new Error(evaluation.exceptionDetails.text || "Chrome runtime evaluation failed.");
+
+			lastValue = evaluation.result?.value;
+
+			if (predicate(lastValue))
+				return lastValue;
+		}
+		catch (error) {
+			lastValue = String(error);
+		}
+
+		await delay(100);
+	}
+
+	throw new Error(`${label}: timed out; last value: ${JSON.stringify(lastValue)}`);
+}
+
+async function waitForBodyText(cdp: CdpSession, pattern: RegExp, label: string) {
+	return waitForRuntimeCondition(
+		cdp,
+		"document.body?.innerText ?? ''",
+		(value) => {
+			pattern.lastIndex = 0;
+			return typeof value === "string" && pattern.test(value);
+		},
+		label
+	);
+}
+
+async function waitForDocumentReady(
+	cdp: CdpSession,
+	expectedUrl: string,
+	label: string,
+	timeoutMs = 15000
+) {
+	const deadline = Date.now() + timeoutMs;
+	const normalizedExpectedUrl = new URL(expectedUrl).href;
+	let lastState = "document state unavailable";
+
+	while (Date.now() < deadline) {
+		try {
+			const evaluation = await cdp.send("Runtime.evaluate", {
+				awaitPromise: false,
+				expression: `({
+					hasNuxtDocument: Boolean(document.body && document.querySelector("#__nuxt")),
+					href: window.location.href,
+					readyState: document.readyState
+				})`,
+				returnByValue: true
+			});
+			const state = evaluation.result?.value as {
+				hasNuxtDocument?: boolean;
+				href?: string;
+				readyState?: string;
+			} | undefined;
+
+			lastState = JSON.stringify(state ?? {});
+
+			if (
+				state?.hasNuxtDocument
+				&& state.href
+				&& new URL(state.href).href === normalizedExpectedUrl
+				&& state.readyState !== "loading"
+			)
+				return;
+		}
+		catch (error) {
+			lastState = String(error);
+		}
+
+		await delay(100);
+	}
+
+	throw new Error(`${label}: timed out waiting for ${normalizedExpectedUrl}; last state: ${lastState}`);
+}
+
+async function navigateAndWait(cdp: CdpSession, url: string, label: string) {
+	await cdp.send("Page.navigate", { url });
+	await waitForDocumentReady(cdp, url, label);
 }
 
 async function waitForUrl(url: string, label: string) {
@@ -567,7 +654,9 @@ before(async () => {
 		ADMIN_BOOTSTRAP_USERNAME: adminUsername,
 		ADMIN_DB_PATH: adminDbPath,
 		ADMIN_DATABASE_URL: "",
+		ADMIN_SESSION_SECRET: adminSessionSecret,
 		ADMIN_STORE_DRIVER: "sqlite",
+		ACTIVE_LOOKUP_COOKIE_SECRET: activeLookupCookieSecret,
 		DATABASE_URL: "",
 		LIVE_COVERAGE_FILE: localCoverageFile,
 		PORT: String(apiPort)
@@ -873,7 +962,8 @@ test("built app exposes a protected admin portal when admin env is configured", 
 			username: adminUsername
 		}),
 		headers: {
-			"Content-Type": "application/json"
+			"Content-Type": "application/json",
+			Origin: appBaseUrl
 		},
 		method: "POST"
 	});
@@ -933,7 +1023,8 @@ test("built app exposes a protected admin portal when admin env is configured", 
 		}),
 		headers: {
 			"Content-Type": "application/json",
-			cookie: sessionCookie || ""
+			cookie: sessionCookie || "",
+			Origin: appBaseUrl
 		},
 		method: "POST"
 	});
@@ -1014,20 +1105,36 @@ test("built app does not log a hydration mismatch when dark mode is stored befor
 		await cdp.send("Runtime.enable");
 		await cdp.send("Log.enable");
 
-		const initialLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: appBaseUrl });
-		await initialLoad;
+		await navigateAndWait(cdp, appBaseUrl, "dark-mode initial page load");
 		await delay(500);
 
 		consoleMessages.length = 0;
 
-		const reloadComplete = cdp.waitForEvent("Page.loadEventFired");
 		await cdp.send("Runtime.evaluate", {
 			awaitPromise: false,
 			expression: `localStorage.setItem('nuxt-color-mode', 'dark'); location.reload();`,
 			returnByValue: true
 		});
-		await reloadComplete;
+		await waitForRuntimeCondition(
+			cdp,
+			`({
+				colorModeClass: document.documentElement.className,
+				navigationType: performance.getEntriesByType("navigation")[0]?.type ?? null,
+				themeToggleLabel: document.querySelector('[aria-label^="Switch to "]')?.getAttribute("aria-label") ?? null
+			})`,
+			(value) => {
+				const state = value as {
+					colorModeClass?: string;
+					navigationType?: string;
+					themeToggleLabel?: null | string;
+				} | undefined;
+
+				return state?.navigationType === "reload"
+					&& /\bdark\b/.test(state.colorModeClass ?? "")
+					&& state.themeToggleLabel === "Switch to light mode";
+			},
+			"dark-mode preference reload"
+		);
 		await delay(1200);
 
 		const evaluation = await cdp.send("Runtime.evaluate", {
@@ -1138,14 +1245,11 @@ test("stale client tabs recover cleanly when the stored build id is older than t
 			consoleMessages.push(`${params.entry?.level || "log"} ${params.entry?.text || ""}`.trim());
 		});
 
-		const initialLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: appBaseUrl });
-		await initialLoad;
+		await navigateAndWait(cdp, appBaseUrl, "stale-client initial page load");
 		await delay(500);
 
 		consoleMessages.length = 0;
 
-		const reloadComplete = cdp.waitForEvent("Page.loadEventFired");
 		await cdp.send("Runtime.evaluate", {
 			awaitPromise: false,
 			expression: `(() => {
@@ -1155,12 +1259,9 @@ test("stale client tabs recover cleanly when the stored build id is older than t
 			})()`,
 			returnByValue: true
 		});
-		await reloadComplete;
-		await delay(1600);
-
-		const evaluation = await cdp.send("Runtime.evaluate", {
-			awaitPromise: false,
-			expression: `(() => {
+		const pageState = await waitForRuntimeCondition(
+			cdp,
+			`(() => {
 				const currentBuildId = document.documentElement.getAttribute("data-app-build") || "";
 				return {
 					currentBuildId,
@@ -1171,9 +1272,26 @@ test("stale client tabs recover cleanly when the stored build id is older than t
 					storedBuildId: window.sessionStorage.getItem(${JSON.stringify(staleClientBuildStorageKey)}),
 				};
 			})()`,
-			returnByValue: true
-		});
-		const pageState = evaluation.result?.value as {
+			(value) => {
+				const state = value as {
+					currentBuildId?: string;
+					hasStaleRecoveryAttr?: boolean;
+					recoveryMarker?: null | string;
+					reloadMarkerCleared?: null | string;
+					reloadMarkerSeen?: null | string;
+					storedBuildId?: null | string;
+				} | undefined;
+				const currentBuildId = state?.currentBuildId ?? "";
+
+				return currentBuildId.length > 0
+					&& state?.storedBuildId === currentBuildId
+					&& state.hasStaleRecoveryAttr === false
+					&& state.recoveryMarker === "1"
+					&& state.reloadMarkerCleared === null
+					&& state.reloadMarkerSeen === `${staleClientReloadKeyPrefix}${currentBuildId}`;
+			},
+			"stale-client recovery reload"
+		) as {
 			currentBuildId?: string;
 			hasStaleRecoveryAttr?: boolean;
 			recoveryMarker?: null | string;
@@ -1181,6 +1299,7 @@ test("stale client tabs recover cleanly when the stored build id is older than t
 			reloadMarkerSeen?: null | string;
 			storedBuildId?: null | string;
 		};
+		await delay(300);
 		const currentBuildId = pageState.currentBuildId ?? "";
 
 		assert.ok(currentBuildId.length > 0);
@@ -1249,19 +1368,24 @@ test("nationwide lookup context survives client navigation across results, distr
 		await cdp.send("Page.enable");
 		await cdp.send("Runtime.enable");
 
-		const initialLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: appBaseUrl });
-		await initialLoad;
+		await navigateAndWait(cdp, appBaseUrl, "nationwide-context initial page load");
 		await delay(500);
+		await cdp.send("Network.enable");
+		await cdp.send("Network.setCookie", {
+			httpOnly: true,
+			name: activeNationwideLookupCookieName,
+			sameSite: "Strict",
+			url: appBaseUrl,
+			value: activeNationwideLookupCookieValue
+		});
 
-		const seedAndNavigate = cdp.waitForEvent("Page.loadEventFired");
 		await cdp.send("Runtime.evaluate", {
 			awaitPromise: false,
-			expression: `document.cookie = ${JSON.stringify(`${activeNationwideLookupCookie}; path=/`)}; localStorage.setItem('ballot-clarity:civic-store', ${JSON.stringify(JSON.stringify(nationwideLookupSnapshot))}); location.assign('${appBaseUrl}/results');`,
+			expression: `localStorage.setItem('ballot-clarity:civic-store', ${JSON.stringify(JSON.stringify(nationwideLookupSnapshot))}); location.assign('${appBaseUrl}/results');`,
 			returnByValue: true
 		});
-		await seedAndNavigate;
-		await delay(1200);
+		await waitForDocumentReady(cdp, `${appBaseUrl}/results`, "nationwide-context results navigation");
+		await waitForBodyText(cdp, /Representative data/, "nationwide-context results hydration");
 
 		const resultsText = await getDocumentBodyText(cdp);
 		assert.match(resultsText, /Provo, Utah/);
@@ -1269,37 +1393,32 @@ test("nationwide lookup context survives client navigation across results, distr
 		assert.match(resultsText, /5 representative matches/);
 		assert.match(resultsText, /Civic results ready/i);
 
-		const districtsLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: `${appBaseUrl}/districts` });
-		await districtsLoad;
-		await delay(800);
+		await navigateAndWait(cdp, `${appBaseUrl}/districts`, "nationwide-context districts navigation");
+		await waitForBodyText(cdp, /Marsha Judkins/, "nationwide-context districts hydration");
 		const districtsText = await getDocumentBodyText(cdp);
 		assert.match(districtsText, /Provo, Utah/);
-		assert.match(districtsText, /Local officials not attached yet/);
 		assert.match(districtsText, /Mike Kennedy/);
+		assert.match(districtsText, /Marsha Judkins/);
+		assert.doesNotMatch(districtsText, /Local officials not attached yet/);
 
-		const districtDetailLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: `${appBaseUrl}/districts/provo-city` });
-		await districtDetailLoad;
-		await delay(800);
+		await navigateAndWait(cdp, `${appBaseUrl}/districts/provo-city`, "nationwide-context district-detail navigation");
+		await waitForBodyText(cdp, /Marsha Judkins/, "nationwide-context district-detail hydration");
 		const districtDetailText = await getDocumentBodyText(cdp);
 		assert.doesNotMatch(districtDetailText, /District page unavailable/);
 		assert.match(districtDetailText, /Provo city/);
-		assert.match(districtDetailText, /No city officeholder data is attached here yet\. This does not mean the city has no officials\./i);
+		assert.match(districtDetailText, /Marsha Judkins/);
+		assert.match(districtDetailText, /1 current representative/);
 
-		const representativesLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: `${appBaseUrl}/representatives` });
-		await representativesLoad;
-		await delay(800);
+		await navigateAndWait(cdp, `${appBaseUrl}/representatives`, "nationwide-context representatives navigation");
+		await waitForBodyText(cdp, /7 current officials across 5 district matches/, "nationwide-context representatives hydration");
 		const representativesText = await getDocumentBodyText(cdp);
 		assert.match(representativesText, /Representative directory/);
 		assert.match(representativesText, /Mike Kennedy/);
-		assert.match(representativesText, /5 current officials across 5 district matches/);
+		assert.match(representativesText, /Marsha Judkins/);
+		assert.match(representativesText, /7 current officials across 5 district matches/);
 
-		const representativeDetailLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: `${appBaseUrl}/representatives/mike-kennedy` });
-		await representativeDetailLoad;
-		await delay(800);
+		await navigateAndWait(cdp, `${appBaseUrl}/representatives/mike-kennedy`, "nationwide-context representative-detail navigation");
+		await waitForBodyText(cdp, /Provider record/, "nationwide-context representative-detail hydration");
 		const representativeDetailText = await getDocumentBodyText(cdp);
 		assert.match(representativeDetailText, /Mike Kennedy/);
 		assert.doesNotMatch(representativeDetailText, /Representative profile not available/);
@@ -1308,18 +1427,14 @@ test("nationwide lookup context survives client navigation across results, distr
 		assert.equal(await countSelectorMatches(cdp, "#at-a-glance"), 1);
 		assert.equal(await countSelectorMatches(cdp, "[data-representative-sidebar='record-details']"), 1);
 
-		const fundingLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: `${appBaseUrl}/representatives/mike-kennedy/funding` });
-		await fundingLoad;
-		await delay(800);
+		await navigateAndWait(cdp, `${appBaseUrl}/representatives/mike-kennedy/funding`, "nationwide-context funding navigation");
+		await waitForBodyText(cdp, /Mike Kennedy funding/, "nationwide-context funding hydration");
 		const fundingText = await getDocumentBodyText(cdp);
 		assert.match(fundingText, /Mike Kennedy funding/);
 		assert.match(fundingText, /Funding unavailable|No campaign-finance summary is attached to this officeholder yet/);
 
-		const influenceLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: `${appBaseUrl}/representatives/mike-kennedy/influence` });
-		await influenceLoad;
-		await delay(800);
+		await navigateAndWait(cdp, `${appBaseUrl}/representatives/mike-kennedy/influence`, "nationwide-context influence navigation");
+		await waitForBodyText(cdp, /Mike Kennedy influence/, "nationwide-context influence hydration");
 		const influenceText = await getDocumentBodyText(cdp);
 		assert.match(influenceText, /Mike Kennedy influence/);
 		assert.match(influenceText, /Influence unavailable|No lobbying or disclosure summary is attached to this officeholder yet/);
@@ -1376,19 +1491,33 @@ test("saved guide shell context loads district and representative hubs without a
 		await cdp.send("Page.enable");
 		await cdp.send("Runtime.enable");
 
-		const initialLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: appBaseUrl });
-		await initialLoad;
-		await delay(500);
+		await cdp.send("Log.enable");
+		const consoleMessages: string[] = [];
+		const cleanupConsoleListener = cdp.on("Runtime.consoleAPICalled", (params) => {
+			const text = (params.args ?? [])
+				.map((entry: { description?: string; value?: unknown }) => typeof entry.value === "string"
+					? entry.value
+					: entry.description ?? "")
+				.filter(Boolean)
+				.join(" ");
 
-		const seedAndNavigate = cdp.waitForEvent("Page.loadEventFired");
+			consoleMessages.push(`${params.type || "log"} ${text}`.trim());
+		});
+		const cleanupLogListener = cdp.on("Log.entryAdded", (params) => {
+			consoleMessages.push(`${params.entry?.level || "log"} ${params.entry?.text || ""}`.trim());
+		});
+
+		await navigateAndWait(cdp, appBaseUrl, "saved-guide initial page load");
+		await delay(500);
+		consoleMessages.length = 0;
+
 		await cdp.send("Runtime.evaluate", {
 			awaitPromise: false,
 			expression: `document.cookie = ${JSON.stringify(`${activeNationwideLookupCookieName}=; Max-Age=0; path=/`)}; localStorage.setItem('ballot-clarity:civic-store', ${JSON.stringify(JSON.stringify(guideShellOnlySnapshot))}); location.assign('${appBaseUrl}/representatives');`,
 			returnByValue: true
 		});
-		await seedAndNavigate;
-		await delay(1200);
+		await waitForDocumentReady(cdp, `${appBaseUrl}/representatives`, "saved-guide representatives navigation");
+		await waitForBodyText(cdp, /4 current officials across 4 district matches/, "saved-guide representatives hydration");
 
 		const representativesText = await getDocumentBodyText(cdp);
 		assert.match(representativesText, /Fulton County, Georgia/);
@@ -1398,17 +1527,22 @@ test("saved guide shell context loads district and representative hubs without a
 		assert.match(representativesText, /Robb Pitts|Shawn Still/);
 		assert.doesNotMatch(representativesText, /Start with lookup|Refresh results for this page/);
 
-		const districtsLoad = cdp.waitForEvent("Page.loadEventFired");
-		await cdp.send("Page.navigate", { url: `${appBaseUrl}/districts` });
-		await districtsLoad;
-		await delay(800);
+		await navigateAndWait(cdp, `${appBaseUrl}/districts`, "saved-guide districts navigation");
+		await waitForBodyText(cdp, /Fulton County|State Senate District 48/, "saved-guide districts hydration");
 
 		const districtsText = await getDocumentBodyText(cdp);
 		assert.match(districtsText, /Fulton County, Georgia/);
 		assert.match(districtsText, /District pages/);
 		assert.match(districtsText, /Fulton County|State Senate District 48|Johns Creek city/);
 		assert.doesNotMatch(districtsText, /Start with lookup|Refresh results for this page/);
+		assert.equal(
+			consoleMessages.some(message => /hydration|mismatch/i.test(message)),
+			false,
+			`Unexpected saved-guide console output:\n${consoleMessages.join("\n")}`
+		);
 
+		cleanupConsoleListener();
+		cleanupLogListener();
 		await cdp.close();
 		cdp = null;
 	}

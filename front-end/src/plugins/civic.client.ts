@@ -5,10 +5,14 @@ export default defineNuxtPlugin((nuxtApp) => {
 	const civicStore = useCivicStore();
 	const api = useApiClient();
 	const coverageState = useNuxtData<CoverageResponse | null>("coverage-profile");
+	let hasHydrated = false;
 
-	civicStore.hydrateFromStorage();
+	nuxtApp.hook("page:finish", () => {
+		if (hasHydrated)
+			return;
 
-	nuxtApp.hook("app:mounted", () => {
+		hasHydrated = true;
+		civicStore.hydrateFromStorage();
 		civicStore.markHydrated();
 
 		const hasManualLookupContext = Boolean(

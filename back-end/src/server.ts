@@ -70,6 +70,7 @@ import express from "express";
 import {
 	buildActiveNationwideLookupContext,
 	buildActiveNationwideLookupCookie,
+	buildActiveNationwideLookupResponse,
 	buildNationwideDistrictRecordResponse,
 	buildNationwideDistrictRoleGuide,
 	buildNationwideDistrictsResponse,
@@ -123,9 +124,11 @@ import { createZipLocationService } from "./zip-location.js";
 import { createZipLookupLogger } from "./zip-lookup-logger.js";
 
 interface CreateAppOptions {
+	activeLookupCookieSecret?: string | null;
 	adminApiKey?: string | null;
 	adminDbPath?: string | null;
 	adminSessionSecret?: string | null;
+	addressCacheEncryptionKey?: string | null;
 	allowLegacyAdminActorHeadersForTesting?: boolean;
 	addressEnrichmentService?: AddressEnrichmentService | null;
 	bootstrapDisplayName?: string | null;
@@ -173,6 +176,8 @@ function summarizeMatchedDistricts(labels: string[]) {
 }
 
 const localCorsOriginPattern = /^https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?$/i;
+const exactZipLookupPattern = /^\d{5}$/u;
+const routeSelectionIdPattern = /^\w[\w.:-]{0,255}$/u;
 const contentSecurityPolicyReportOnly = [
 	"base-uri 'none'",
 	"default-src 'none'",
@@ -2776,6 +2781,7 @@ function buildSearchResponse(
 
 export async function createApp(options: CreateAppOptions = {}) {
 	const app = express();
+	const activeLookupCookieSecret = options.activeLookupCookieSecret ?? process.env.ACTIVE_LOOKUP_COOKIE_SECRET ?? "";
 	const adminApiKey = options.adminApiKey ?? process.env.ADMIN_API_KEY ?? null;
 	const adminSessionSecret = options.adminSessionSecret ?? process.env.ADMIN_SESSION_SECRET ?? null;
 	const coverageRepository = options.coverageRepository ?? await createCoverageRepository();
@@ -2832,7 +2838,10 @@ export async function createApp(options: CreateAppOptions = {}) {
 		? createAddressEnrichmentService(
 				createCensusGeocoderClient(),
 				openStatesClient,
-				await createAddressCacheRepository(process.env.ADMIN_DATABASE_URL || process.env.DATABASE_URL || "")
+				await createAddressCacheRepository(
+					process.env.ADMIN_DATABASE_URL || process.env.DATABASE_URL || "",
+					options.addressCacheEncryptionKey ?? process.env.ADDRESS_CACHE_ENCRYPTION_KEY ?? ""
+				)
 			)
 		: options.addressEnrichmentService;
 	const resolvedSourceInventory = resolveSources(coverageRepository.data.sources);
@@ -4207,11 +4216,16 @@ export async function createApp(options: CreateAppOptions = {}) {
 		const routeSelectionId = typeof request.query.selection === "string" ? request.query.selection.trim() : "";
 
 		if (routeLookup) {
-			const validationError = validateLookupInput(routeLookup);
-
-			if (validationError) {
+			if (!exactZipLookupPattern.test(routeLookup)) {
 				response.status(400).json({
-					message: validationError
+					message: "Only an exact 5-digit ZIP code may be included in a page URL. Submit street addresses through the lookup form."
+				});
+				return null;
+			}
+
+			if (routeSelectionId && !routeSelectionIdPattern.test(routeSelectionId)) {
+				response.status(400).json({
+					message: "The selected ZIP area identifier is invalid."
 				});
 				return null;
 			}
@@ -4233,7 +4247,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 			const lookupResponse = await resolveLocationLookup(routeLookup, response.locals.requestId, routeSelectionId || undefined);
 			const activeLookupContext = buildActiveNationwideLookupContext(lookupResponse);
-			const activeLookupCookie = buildActiveNationwideLookupCookie(lookupResponse);
+			const activeLookupCookie = buildActiveNationwideLookupCookie(lookupResponse, activeLookupCookieSecret);
 
 			if (activeLookupCookie)
 				persistActiveNationwideLookupCookie(response, activeLookupCookie);
@@ -4241,7 +4255,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			return activeLookupContext;
 		}
 
-		return readActiveNationwideLookupContext(request.header("cookie"));
+		return readActiveNationwideLookupContext(request.header("cookie"), activeLookupCookieSecret);
 	}
 
 	if (process.env.TRUST_PROXY === "true")
@@ -4628,9 +4642,9 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 		const validationError = validateLookupInput(raw);
 
-		if (validationError) {
+		if (validationError || (selectionId && !routeSelectionIdPattern.test(selectionId))) {
 			response.status(400).json({
-				message: validationError
+				message: validationError || "The selected ZIP area identifier is invalid."
 			});
 			return;
 		}
@@ -4654,7 +4668,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 		await zipLookupLogger.record(raw, lookupResponse);
 
-		const activeLookupCookie = buildActiveNationwideLookupCookie(lookupResponse);
+		const activeLookupCookie = buildActiveNationwideLookupCookie(lookupResponse, activeLookupCookieSecret);
 
 		if (activeLookupCookie)
 			persistActiveNationwideLookupCookie(response, activeLookupCookie);
@@ -4662,6 +4676,16 @@ export async function createApp(options: CreateAppOptions = {}) {
 			clearActiveNationwideLookupCookie(response);
 
 		response.json(lookupResponse);
+	});
+
+	app.get("/api/location/active", (request, response) => {
+		response.set("Cache-Control", "no-store");
+		const activeLookup = readActiveNationwideLookupContext(
+			request.header("cookie"),
+			activeLookupCookieSecret
+		);
+
+		response.json(activeLookup ? buildActiveNationwideLookupResponse(activeLookup) : null);
 	});
 
 	app.get("/api/location/guess", async (request, response) => {
@@ -4709,7 +4733,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			detectedFromIp: true,
 			note: `${buildLocationGuessNotePrefix(guess)} ${lookupResponse.note}`.trim()
 		};
-		const activeLookupCookie = buildActiveNationwideLookupCookie(guessedLookupResponse);
+		const activeLookupCookie = buildActiveNationwideLookupCookie(guessedLookupResponse, activeLookupCookieSecret);
 
 		if (activeLookupCookie)
 			persistActiveNationwideLookupCookie(response, activeLookupCookie);
@@ -5559,7 +5583,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 		logger.error("request.failed", {
 			error: error instanceof Error ? error.message : "Unhandled request error.",
 			method: request.method,
-			path: request.originalUrl,
+			path: request.path,
 			requestId: response.locals.requestId,
 			stack: error instanceof Error ? error.stack : undefined
 		});

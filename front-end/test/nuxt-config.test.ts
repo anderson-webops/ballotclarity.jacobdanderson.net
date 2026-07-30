@@ -59,14 +59,16 @@ test("nuxt config uses srcDir and expected civic modules", async () => {
 	) ?? [];
 	assert.deepEqual(
 		analyticsScripts.map(script => ({
+			async: script.async,
+			defer: script.defer,
 			src: script.src,
-			websiteId: script["data-website-id"],
-			defer: script.defer
+			websiteId: script["data-website-id"]
 		})),
 		analyticsTrackers.map(tracker => ({
+			async: true,
+			defer: undefined,
 			src: `https://${tracker.domain}/script.js`,
-			websiteId: tracker.websiteId,
-			defer: true
+			websiteId: tracker.websiteId
 		}))
 	);
 	assert.ok(!config.app?.head?.script?.some(script =>
