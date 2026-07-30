@@ -49,9 +49,9 @@ Guide publication requires an authenticated administrator with enrolled MFA, a s
 
 ## Code-scanning interpretation
 
-Two precise CodeQL suppressions document cryptographic uses that are safe but are not distinguishable from credential handling through field-name taint alone:
+Three precise CodeQL false-positive dispositions document cryptographic uses that are safe but are not distinguishable from credential handling through field-name taint alone:
 
-- SHA-256 in the SQLite and Postgres admin stores links immutable audit records into a tamper-evident chain. It does not hash passwords; account passwords use scrypt.
+- The two SHA-256 findings in the SQLite and Postgres admin stores link immutable audit records into a tamper-evident chain. They do not hash passwords; account passwords use scrypt.
 - The saved nationwide-lookup cookie sink receives only authenticated ciphertext returned by the dedicated secret-envelope function. Raw address input is excluded from the compact cookie payload and is never passed to the cookie writer.
 
 All other findings from the security-extended scan are remediated in executable source or tests rather than dismissed in the repository dashboard.

@@ -1063,7 +1063,6 @@ export function persistActiveNationwideLookupCookie(response: {
 	cookie: (name: string, value: string, options?: Record<string, unknown>) => void;
 }, value: SealedActiveNationwideLookupCookie) {
 	// The value is authenticated ciphertext produced by sealSecretJson, never raw lookup input.
-	// codeql[js/clear-text-storage-of-sensitive-data]
 	response.cookie(activeNationwideLookupCookieName, value, {
 		httpOnly: true,
 		maxAge: cookieMaxAgeSeconds * 1000,

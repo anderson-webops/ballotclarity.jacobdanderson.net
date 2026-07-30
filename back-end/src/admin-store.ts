@@ -886,7 +886,6 @@ function stableStringify(value: unknown): string {
 
 function hashAuditEvent(input: Omit<AuditRow, "event_hash">) {
 	// This digest links immutable audit records; credentials are separately hashed with scrypt.
-	// codeql[js/insufficient-password-hash]
 	return createHash("sha256").update(stableStringify(input)).digest("hex");
 }
 

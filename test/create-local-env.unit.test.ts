@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+	closeSync,
+	constants,
+	fstatSync,
 	lstatSync,
 	mkdtempSync,
+	openSync,
 	readFileSync,
 	rmSync,
-	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -16,6 +19,22 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const createLocalEnvScript = fileURLToPath(new URL("../scripts/create-local-env.mjs", import.meta.url));
+
+function readRegularFileSnapshot(path: string) {
+	const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+
+	try {
+		const stats = fstatSync(descriptor);
+		assert.equal(stats.isFile(), true);
+		return {
+			content: readFileSync(descriptor, "utf8"),
+			mode: stats.mode & 0o777,
+		};
+	}
+	finally {
+		closeSync(descriptor);
+	}
+}
 
 function runCreateLocalEnv(cwd: string, force = false) {
 	execFileSync(
@@ -34,15 +53,16 @@ test("local environment creation is exclusive, owner-only, and atomically replac
 
 	try {
 		runCreateLocalEnv(root);
-		const initialContent = readFileSync(envPath, "utf8");
-		assert.equal(statSync(envPath).mode & 0o777, 0o600);
+		const initialSnapshot = readRegularFileSnapshot(envPath);
+		assert.equal(initialSnapshot.mode, 0o600);
 
 		runCreateLocalEnv(root);
-		assert.equal(readFileSync(envPath, "utf8"), initialContent);
+		assert.equal(readRegularFileSnapshot(envPath).content, initialSnapshot.content);
 
 		runCreateLocalEnv(root, true);
-		assert.notEqual(readFileSync(envPath, "utf8"), initialContent);
-		assert.equal(statSync(envPath).mode & 0o777, 0o600);
+		const replacementSnapshot = readRegularFileSnapshot(envPath);
+		assert.notEqual(replacementSnapshot.content, initialSnapshot.content);
+		assert.equal(replacementSnapshot.mode, 0o600);
 	}
 	finally {
 		rmSync(root, { force: true, recursive: true });
@@ -66,7 +86,7 @@ test("local environment creation does not follow an existing symlink", () => {
 		runCreateLocalEnv(root, true);
 		assert.equal(lstatSync(envPath).isSymbolicLink(), false);
 		assert.equal(readFileSync(sentinelPath, "utf8"), sentinel);
-		assert.equal(statSync(envPath).mode & 0o777, 0o600);
+		assert.equal(readRegularFileSnapshot(envPath).mode, 0o600);
 	}
 	finally {
 		rmSync(root, { force: true, recursive: true });
