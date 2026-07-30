@@ -1357,6 +1357,17 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 			if (!current)
 				throw new Error("Admin user not found.");
 
+			const actorUsername = patch.auditActor?.username?.trim().toLowerCase();
+			const administrativeSelfMutation = patch.passwordChangeMode !== "self-service"
+				&& actorUsername === current.username
+				&& (patch.disabled !== undefined || patch.mfaReset === true || patch.password !== undefined);
+
+			if (administrativeSelfMutation) {
+				throw new Error(
+					"Use the self-service password or MFA workflow for the authenticated account. Administrative account recovery must target a different user."
+				);
+			}
+
 			const now = new Date().toISOString();
 			const nextDisabledAt = patch.disabled === undefined
 				? current.disabled_at

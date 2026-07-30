@@ -2,6 +2,8 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { CoverageRepository } from "../src/coverage-repository.js";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
+import { createHmac } from "node:crypto";
 import { once } from "node:events";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +20,7 @@ import { buildSeedCoverageSnapshot } from "../src/coverage-repository.js";
 import { buildGuidePackageId } from "../src/guide-packages.js";
 import { createPublicRequestThrottle } from "../src/public-request-throttle.js";
 import { classifyRepresentative } from "../src/representative-classification.js";
-import { createApp } from "../src/server.js";
+import { createApp as createApplication } from "../src/server.js";
 
 function findRepoRoot() {
 	const cwd = process.cwd();
@@ -38,6 +40,20 @@ const contentSeed = defaultContentSeed();
 const correctionSeed = demoAdminCorrections.corrections;
 const sourceMonitorSeed = demoAdminSourceMonitor.sources;
 const activitySeed = demoAdminOverview.recentActivity;
+
+function createApp(options: Parameters<typeof createApplication>[0] = {}) {
+	return createApplication({
+		allowLegacyAdminActorHeadersForTesting: true,
+		...options
+	});
+}
+
+function createTestAdminSessionToken(payload: Record<string, unknown>, sessionSecret: string) {
+	const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
+	const signature = createHmac("sha256", sessionSecret).update(encodedPayload).digest("hex");
+
+	return `${encodedPayload}.${signature}`;
+}
 
 function buildRepresentativeMatch({
 	districtLabel,
@@ -3668,6 +3684,252 @@ test("POST /api/admin/auth/login authenticates a configured user and throttles r
 	}
 });
 
+test("admin API fails closed when session delegation is not configured", async () => {
+	const isolatedServer = (await createApplication({
+		adminApiKey,
+		adminDbPath: ":memory:",
+		bootstrapDisplayName: "Operations Admin",
+		bootstrapPassword: "correct-horse-battery-staple",
+		bootstrapUsername: "ops-admin"
+	})).listen(0, "127.0.0.1");
+
+	await once(isolatedServer, "listening");
+	const isolatedAddress = isolatedServer.address() as AddressInfo;
+	const isolatedBaseUrl = `http://127.0.0.1:${isolatedAddress.port}`;
+
+	try {
+		const response = await fetch(`${isolatedBaseUrl}/api/admin/overview`, {
+			headers: {
+				"x-admin-actor-role": "admin",
+				"x-admin-api-key": adminApiKey
+			}
+		});
+		const body = await response.json();
+
+		assert.equal(response.status, 503);
+		assert.match(body.message, /session delegation is not configured/i);
+	}
+	finally {
+		await new Promise<void>((resolve, reject) => {
+			isolatedServer.close(error => error ? reject(error) : resolve());
+		});
+	}
+});
+
+test("admin API requires a current signed session and enforces trusted roles", async () => {
+	const adminSessionSecret = "test-admin-session-secret-that-is-long-enough";
+	const isolatedServer = (await createApp({
+		adminApiKey,
+		adminDbPath: ":memory:",
+		adminSessionSecret,
+		bootstrapDisplayName: "Operations Admin",
+		bootstrapPassword: "correct-horse-battery-staple",
+		bootstrapUsername: "ops-admin"
+	})).listen(0, "127.0.0.1");
+
+	await once(isolatedServer, "listening");
+	const isolatedAddress = isolatedServer.address() as AddressInfo;
+	const isolatedBaseUrl = `http://127.0.0.1:${isolatedAddress.port}`;
+
+	try {
+		const loginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
+			body: JSON.stringify({
+				password: "correct-horse-battery-staple",
+				username: "ops-admin"
+			}),
+			headers: {
+				"Content-Type": "application/json",
+				"x-forwarded-for": "203.0.113.30"
+			},
+			method: "POST"
+		});
+		const loginBody = await loginResponse.json();
+		const adminSessionToken = createTestAdminSessionToken({
+			credentialsUpdatedAt: loginBody.credentialsUpdatedAt,
+			displayName: loginBody.displayName,
+			expiresAt: Date.now() + 60_000,
+			role: loginBody.role,
+			username: loginBody.username
+		}, adminSessionSecret);
+		const adminHeaders = {
+			"Content-Type": "application/json",
+			"x-admin-api-key": adminApiKey,
+			"x-admin-session-token": adminSessionToken
+		};
+
+		assert.equal(loginResponse.status, 200);
+		assert.equal(loginBody.authenticated, true);
+
+		const apiKeyOnlyResponse = await fetch(`${isolatedBaseUrl}/api/admin/overview`, {
+			headers: {
+				"x-admin-api-key": adminApiKey
+			}
+		});
+		const forgedActorResponse = await fetch(`${isolatedBaseUrl}/api/admin/users`, {
+			headers: {
+				"x-admin-actor-display-name": "Forged Admin",
+				"x-admin-actor-role": "admin",
+				"x-admin-actor-username": "forged-admin",
+				"x-admin-api-key": adminApiKey
+			}
+		});
+		const tokenOnlyResponse = await fetch(`${isolatedBaseUrl}/api/admin/overview`, {
+			headers: {
+				"x-admin-session-token": adminSessionToken
+			}
+		});
+		const tamperedTokenResponse = await fetch(`${isolatedBaseUrl}/api/admin/overview`, {
+			headers: {
+				"x-admin-api-key": adminApiKey,
+				"x-admin-session-token": `${adminSessionToken}0`
+			}
+		});
+		const expiredTokenResponse = await fetch(`${isolatedBaseUrl}/api/admin/overview`, {
+			headers: {
+				"x-admin-api-key": adminApiKey,
+				"x-admin-session-token": createTestAdminSessionToken({
+					credentialsUpdatedAt: loginBody.credentialsUpdatedAt,
+					displayName: loginBody.displayName,
+					expiresAt: Date.now() - 1,
+					role: loginBody.role,
+					username: loginBody.username
+				}, adminSessionSecret)
+			}
+		});
+
+		assert.equal(apiKeyOnlyResponse.status, 401);
+		assert.equal(forgedActorResponse.status, 401);
+		assert.equal(tokenOnlyResponse.status, 401);
+		assert.equal(tamperedTokenResponse.status, 401);
+		assert.equal(expiredTokenResponse.status, 401);
+
+		const usersResponse = await fetch(`${isolatedBaseUrl}/api/admin/users`, {
+			headers: adminHeaders
+		});
+		const usersBody = await usersResponse.json();
+		const adminUser = usersBody.users.find((user: { username: string }) => user.username === "ops-admin");
+
+		assert.equal(usersResponse.status, 200);
+		assert.ok(adminUser?.id);
+
+		const missingRoleResponse = await fetch(`${isolatedBaseUrl}/api/admin/users`, {
+			body: JSON.stringify({
+				displayName: "Missing Role",
+				password: "missing-role-password",
+				username: "missing-role"
+			}),
+			headers: adminHeaders,
+			method: "POST"
+		});
+
+		assert.equal(missingRoleResponse.status, 400);
+
+		const createEditorResponse = await fetch(`${isolatedBaseUrl}/api/admin/users`, {
+			body: JSON.stringify({
+				displayName: "Review Editor",
+				password: "review-editor-password",
+				role: "editor",
+				username: "review-editor"
+			}),
+			headers: adminHeaders,
+			method: "POST"
+		});
+		const createEditorBody = await createEditorResponse.json();
+		const editor = createEditorBody.users.find((user: { username: string }) => user.username === "review-editor");
+
+		assert.equal(createEditorResponse.status, 201);
+		assert.ok(editor?.id);
+
+		const editorLoginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
+			body: JSON.stringify({
+				password: "review-editor-password",
+				username: "review-editor"
+			}),
+			headers: {
+				"Content-Type": "application/json",
+				"x-forwarded-for": "203.0.113.31"
+			},
+			method: "POST"
+		});
+		const editorLoginBody = await editorLoginResponse.json();
+		const editorSessionToken = createTestAdminSessionToken({
+			credentialsUpdatedAt: editorLoginBody.credentialsUpdatedAt,
+			displayName: editorLoginBody.displayName,
+			expiresAt: Date.now() + 60_000,
+			role: editorLoginBody.role,
+			username: editorLoginBody.username
+		}, adminSessionSecret);
+		const editorHeaders = {
+			"x-admin-actor-display-name": "Forged Admin",
+			"x-admin-actor-role": "admin",
+			"x-admin-actor-username": "forged-admin",
+			"x-admin-api-key": adminApiKey,
+			"x-admin-session-token": editorSessionToken
+		};
+
+		assert.equal(editorLoginResponse.status, 200);
+
+		const editorOverviewResponse = await fetch(`${isolatedBaseUrl}/api/admin/overview`, {
+			headers: editorHeaders
+		});
+		const editorUsersResponse = await fetch(`${isolatedBaseUrl}/api/admin/users`, {
+			headers: editorHeaders
+		});
+		const editorAuditResponse = await fetch(`${isolatedBaseUrl}/api/admin/audit`, {
+			headers: editorHeaders
+		});
+
+		assert.equal(editorOverviewResponse.status, 200);
+		assert.equal(editorUsersResponse.status, 403);
+		assert.equal(editorAuditResponse.status, 403);
+
+		const roleMutationResponse = await fetch(`${isolatedBaseUrl}/api/admin/users/${editor.id}`, {
+			body: JSON.stringify({ role: "admin" }),
+			headers: adminHeaders,
+			method: "PATCH"
+		});
+		const selfRecoveryResponse = await fetch(`${isolatedBaseUrl}/api/admin/users/${adminUser.id}`, {
+			body: JSON.stringify({ password: "replacement-admin-password" }),
+			headers: adminHeaders,
+			method: "PATCH"
+		});
+
+		assert.equal(roleMutationResponse.status, 400);
+		assert.equal(selfRecoveryResponse.status, 400);
+
+		const resetEditorResponse = await fetch(`${isolatedBaseUrl}/api/admin/users/${editor.id}`, {
+			body: JSON.stringify({ password: "new-review-editor-password" }),
+			headers: adminHeaders,
+			method: "PATCH"
+		});
+
+		assert.equal(resetEditorResponse.status, 200);
+
+		const staleEditorSessionResponse = await fetch(`${isolatedBaseUrl}/api/admin/overview`, {
+			headers: editorHeaders
+		});
+
+		assert.equal(staleEditorSessionResponse.status, 401);
+
+		const auditResponse = await fetch(`${isolatedBaseUrl}/api/admin/audit`, {
+			headers: adminHeaders
+		});
+		const auditBody = await auditResponse.json();
+		const passwordResetEvent = auditBody.events.find(
+			(event: { eventType: string }) => event.eventType === "admin_user_password_reset"
+		);
+
+		assert.equal(auditResponse.status, 200);
+		assert.equal(passwordResetEvent?.actorUsername, "ops-admin");
+		assert.equal(passwordResetEvent?.targetLabel, "Review Editor");
+	}
+	finally {
+		await new Promise<void>((resolve, reject) => {
+			isolatedServer.close(error => error ? reject(error) : resolve());
+		});
+	}
+});
+
 test("admin MFA setup enforces verification codes and supports disable and reset", async () => {
 	const isolatedServer = (await createApp({
 		adminApiKey,
@@ -3868,9 +4130,40 @@ test("admin MFA setup enforces verification codes and supports disable and reset
 		assert.equal(secondEnableResponse.status, 200);
 		assert.ok(secondEnableBody.mfaEnabledAt);
 
-		const resetMfaResponse = await fetch(`${isolatedBaseUrl}/api/admin/users/${adminUser.id}`, {
+		const selfResetMfaResponse = await fetch(`${isolatedBaseUrl}/api/admin/users/${adminUser.id}`, {
 			body: JSON.stringify({ mfaReset: true }),
 			headers: adminHeaders,
+			method: "PATCH"
+		});
+
+		const selfResetMfaBody = await selfResetMfaResponse.json();
+
+		assert.equal(selfResetMfaResponse.status, 400);
+		assert.match(selfResetMfaBody.message, /administrative account recovery must target a different user/i);
+
+		const createRecoveryAdminResponse = await fetch(`${isolatedBaseUrl}/api/admin/users`, {
+			body: JSON.stringify({
+				displayName: "Recovery Admin",
+				password: "recovery-admin-password",
+				role: "admin",
+				username: "recovery-admin"
+			}),
+			headers: adminHeaders,
+			method: "POST"
+		});
+		const recoveryAdminHeaders = {
+			"Content-Type": "application/json",
+			"x-admin-actor-display-name": "Recovery Admin",
+			"x-admin-actor-role": "admin",
+			"x-admin-actor-username": "recovery-admin",
+			"x-admin-api-key": adminApiKey
+		};
+
+		assert.equal(createRecoveryAdminResponse.status, 201);
+
+		const resetMfaResponse = await fetch(`${isolatedBaseUrl}/api/admin/users/${adminUser.id}`, {
+			body: JSON.stringify({ mfaReset: true }),
+			headers: recoveryAdminHeaders,
 			method: "PATCH"
 		});
 		const resetMfaBody = await resetMfaResponse.json();
@@ -3890,7 +4183,10 @@ test("admin MFA setup enforces verification codes and supports disable and reset
 		assert.equal(resetOverviewResponse.status, 200);
 		assert.equal(resetOverviewBody.security.status, "needs_attention");
 		assert.equal(resetOverviewBody.security.mfaEnabledUserCount, 0);
-		assert.equal(resetOverviewBody.security.usersWithoutMfa[0].username, "ops-admin");
+		assert.deepEqual(
+			resetOverviewBody.security.usersWithoutMfa.map((user: { username: string }) => user.username).sort(),
+			["ops-admin", "recovery-admin"]
+		);
 
 		const resetLoginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
 			body: JSON.stringify({
@@ -3933,7 +4229,7 @@ test("admin MFA setup enforces verification codes and supports disable and reset
 	}
 });
 
-test("admin user lifecycle blocks disabled accounts and invalidates reset credentials", async () => {
+test("admin user lifecycle blocks self-administration and invalidates reset credentials", async () => {
 	const isolatedServer = (await createApp({
 		adminApiKey,
 		adminDbPath: ":memory:",
@@ -3973,7 +4269,7 @@ test("admin user lifecycle blocks disabled accounts and invalidates reset creden
 		const disableLastAdminBody = await disableLastAdminResponse.json();
 
 		assert.equal(disableLastAdminResponse.status, 400);
-		assert.match(disableLastAdminBody.message, /last active admin/i);
+		assert.match(disableLastAdminBody.message, /administrative account recovery must target a different user/i);
 
 		const createEditorResponse = await fetch(`${isolatedBaseUrl}/api/admin/users`, {
 			body: JSON.stringify({
@@ -3992,6 +4288,14 @@ test("admin user lifecycle blocks disabled accounts and invalidates reset creden
 		assert.ok(editor?.id);
 		assert.ok(editor.credentialsUpdatedAt);
 		assert.equal(editor.disabledAt, undefined);
+
+		const editorHeaders = {
+			"Content-Type": "application/json",
+			"x-admin-actor-display-name": "Review Editor",
+			"x-admin-actor-role": "editor",
+			"x-admin-actor-username": "review-editor",
+			"x-admin-api-key": adminApiKey
+		};
 
 		const editorLoginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
 			body: JSON.stringify({
@@ -4157,7 +4461,7 @@ test("admin user lifecycle blocks disabled accounts and invalidates reset creden
 				newPassword: "self-service-editor-password",
 				username: "review-editor"
 			}),
-			headers: adminHeaders,
+			headers: editorHeaders,
 			method: "POST"
 		});
 
@@ -4169,7 +4473,7 @@ test("admin user lifecycle blocks disabled accounts and invalidates reset creden
 				newPassword: "short",
 				username: "review-editor"
 			}),
-			headers: adminHeaders,
+			headers: editorHeaders,
 			method: "POST"
 		});
 		const shortSelfChangeBody = await shortSelfChangeResponse.json();
@@ -4183,7 +4487,7 @@ test("admin user lifecycle blocks disabled accounts and invalidates reset creden
 				newPassword: "self-service-editor-password",
 				username: "review-editor"
 			}),
-			headers: adminHeaders,
+			headers: editorHeaders,
 			method: "POST"
 		});
 		const selfChangeBody = await selfChangeResponse.json();

@@ -15,6 +15,7 @@ test("admin audit trail is exposed as an admin-only operations page", () => {
 	assert.match(auditPage, /Most recent audit events/);
 	assert.match(adminLayout, /Audit trail/);
 	assert.match(adminAuth, /Only admin users can view the immutable audit trail/);
-	assert.match(adminAuth, /x-admin-actor-username/);
+	assert.match(adminAuth, /x-admin-session-token/);
+	assert.doesNotMatch(adminAuth, /x-admin-actor-(?:display-name|role|username)/);
 	assert.match(auditRoute, /getAdminAudit/);
 });

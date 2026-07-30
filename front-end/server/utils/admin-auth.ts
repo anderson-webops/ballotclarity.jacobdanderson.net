@@ -22,8 +22,11 @@ import { createError, deleteCookie, getCookie, readBody, setCookie } from "h3";
 import { $fetch, FetchError } from "ofetch";
 import { useRuntimeConfig } from "#imports";
 
-const adminCookieName = "ballot_clarity_admin_session";
+const adminCookieName = process.env.NODE_ENV === "production"
+	? "__Host-ballot_clarity_admin_session"
+	: "ballot_clarity_admin_session";
 const adminSessionMaxAge = 60 * 60 * 12;
+const adminSessionTokenHeaderName = "x-admin-session-token";
 
 interface AdminConfig {
 	apiBase: string;
@@ -108,16 +111,15 @@ function getForwardHeaders(event: H3Event, extraHeaders: Record<string, string> 
 	};
 }
 
-function getAdminActorHeaders(event: H3Event) {
+function getAdminDelegationHeaders(event: H3Event): Record<string, string> {
 	const session = getAdminSession(event);
+	const sessionToken = getCookie(event, adminCookieName);
 
-	if (!session.authenticated)
+	if (!session.authenticated || !sessionToken)
 		return {};
 
 	return {
-		...(session.displayName ? { "x-admin-actor-display-name": session.displayName } : {}),
-		...(session.role ? { "x-admin-actor-role": session.role } : {}),
-		...(session.username ? { "x-admin-actor-username": session.username } : {})
+		[adminSessionTokenHeaderName]: sessionToken
 	};
 }
 
@@ -169,7 +171,7 @@ function setAdminSessionCookie(event: H3Event, sessionResponse: CompleteBackendS
 		httpOnly: true,
 		maxAge: adminSessionMaxAge,
 		path: "/",
-		sameSite: "lax",
+		sameSite: "strict",
 		secure: process.env.NODE_ENV === "production"
 	});
 }
@@ -431,7 +433,7 @@ export async function changeAdminPassword(event: H3Event, body: Record<string, u
 				username: session.username
 			},
 			headers: getForwardHeaders(event, {
-				...getAdminActorHeaders(event),
+				...getAdminDelegationHeaders(event),
 				"x-admin-api-key": config.apiKey
 			}),
 			method: "POST"
@@ -564,7 +566,7 @@ async function fetchAdminApi<T>(event: H3Event, path: string, options?: {
 	return await $fetch<T>(`${config.apiBase}${path}`, {
 		body: options?.body,
 		headers: getForwardHeaders(event, {
-			...getAdminActorHeaders(event),
+			...getAdminDelegationHeaders(event),
 			"x-admin-api-key": config.apiKey
 		}),
 		method: options?.method

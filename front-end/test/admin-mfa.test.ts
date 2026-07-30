@@ -8,6 +8,7 @@ const accountPage = readFileSync(resolve("src/pages/admin/account.vue"), "utf8")
 const usersPage = readFileSync(resolve("src/pages/admin/users.vue"), "utf8");
 const dashboardPage = readFileSync(resolve("src/pages/admin/index.vue"), "utf8");
 const adminAuth = readFileSync(resolve("server/utils/admin-auth.ts"), "utf8");
+const adminOriginMiddleware = readFileSync(resolve("server/middleware/admin-origin.ts"), "utf8");
 const sessionPostRoute = readFileSync(resolve("server/api/admin/session.post.ts"), "utf8");
 const mfaSetupRoute = readFileSync(resolve("server/api/admin/session/mfa/setup.post.ts"), "utf8");
 const mfaEnableRoute = readFileSync(resolve("server/api/admin/session/mfa/enable.post.ts"), "utf8");
@@ -52,4 +53,16 @@ test("admin dashboard exposes MFA coverage from the protected overview", () => {
 	assert.match(dashboardPage, /security\.mfaEnabledUserCount/);
 	assert.match(dashboardPage, /security\.usersWithoutMfa/);
 	assert.match(dashboardPage, /Manage users/);
+});
+
+test("admin sessions use secure cookies, signed backend delegation, and same-origin mutation checks", () => {
+	assert.match(adminAuth, /__Host-ballot_clarity_admin_session/);
+	assert.match(adminAuth, /httpOnly: true/);
+	assert.match(adminAuth, /sameSite: "strict"/);
+	assert.match(adminAuth, /secure: process\.env\.NODE_ENV === "production"/);
+	assert.match(adminAuth, /x-admin-session-token/);
+	assert.doesNotMatch(adminAuth, /x-admin-actor-(?:display-name|role|username)/);
+	assert.match(adminOriginMiddleware, /pathname\.startsWith\("\/api\/admin"\)/);
+	assert.match(adminOriginMiddleware, /isAllowedAdminMutationOrigin/);
+	assert.match(adminOriginMiddleware, /no-store, private/);
 });

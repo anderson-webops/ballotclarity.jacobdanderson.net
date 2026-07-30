@@ -1,4 +1,4 @@
-import type { ErrorRequestHandler, Request } from "express";
+import type { ErrorRequestHandler, Request, Response } from "express";
 import type { AddressEnrichmentService } from "./address-enrichment.js";
 import type { AdminAuditActor } from "./admin-store.js";
 import type { CongressClient, CongressMemberDetail, CongressMemberRecord } from "./congress.js";
@@ -86,6 +86,7 @@ import { createAddressCacheRepository } from "./address-cache-repository.js";
 import { createAddressEnrichmentService } from "./address-enrichment.js";
 import { createAdminLoginThrottle } from "./admin-login-throttle.js";
 import { createAdminRepository } from "./admin-repository.js";
+import { parseAdminSessionToken } from "./admin-session-token.js";
 import { buildBallotContentProviderSummary, getPublicBallotContentProviderOptions } from "./ballot-content-providers.js";
 import { createCensusGeocoderClient } from "./census-geocoder.js";
 import { createCongressClient, isCurrentCongressMemberRecord } from "./congress.js";
@@ -124,6 +125,8 @@ import { createZipLookupLogger } from "./zip-lookup-logger.js";
 interface CreateAppOptions {
 	adminApiKey?: string | null;
 	adminDbPath?: string | null;
+	adminSessionSecret?: string | null;
+	allowLegacyAdminActorHeadersForTesting?: boolean;
 	addressEnrichmentService?: AddressEnrichmentService | null;
 	bootstrapDisplayName?: string | null;
 	bootstrapPassword?: string | null;
@@ -356,7 +359,7 @@ function inferSupplementalChamberLabel(
 	return undefined;
 }
 
-function buildAdminAuditActor(request: Request): AdminAuditActor | undefined {
+function buildLegacyAdminAuditActor(request: Request): AdminAuditActor | undefined {
 	const username = request.header("x-admin-actor-username")?.trim().toLowerCase();
 	const displayName = request.header("x-admin-actor-display-name")?.trim();
 	const roleHeader = request.header("x-admin-actor-role")?.trim();
@@ -370,6 +373,34 @@ function buildAdminAuditActor(request: Request): AdminAuditActor | undefined {
 		role,
 		username
 	};
+}
+
+function getAdminAuditActor(response: Response): AdminAuditActor | undefined {
+	return response.locals.adminActor as AdminAuditActor | undefined;
+}
+
+function requireAdminRole(response: Response) {
+	const actor = getAdminAuditActor(response);
+
+	if (actor?.role === "admin")
+		return true;
+
+	response.status(403).json({
+		message: "Admin role required."
+	});
+	return false;
+}
+
+function requireSelfServiceActor(response: Response, username: string) {
+	const actor = getAdminAuditActor(response);
+
+	if (actor?.username && actor.username === username)
+		return true;
+
+	response.status(403).json({
+		message: "Admin self-service actions must target the authenticated account."
+	});
+	return false;
 }
 
 function buildAdminSessionResponse(user: AdminUser) {
@@ -2746,6 +2777,7 @@ function buildSearchResponse(
 export async function createApp(options: CreateAppOptions = {}) {
 	const app = express();
 	const adminApiKey = options.adminApiKey ?? process.env.ADMIN_API_KEY ?? null;
+	const adminSessionSecret = options.adminSessionSecret ?? process.env.ADMIN_SESSION_SECRET ?? null;
 	const coverageRepository = options.coverageRepository ?? await createCoverageRepository();
 	const guidePackageSeed = options.guidePackageSeed ?? buildDefaultGuidePackageSeed(coverageRepository);
 	const adminRepository = await createAdminRepository({
@@ -4428,6 +4460,57 @@ export async function createApp(options: CreateAppOptions = {}) {
 		});
 	});
 
+	app.use("/api/admin", async (request, response, next) => {
+		if (!adminSessionSecret) {
+			if (!options.allowLegacyAdminActorHeadersForTesting) {
+				response.status(503).json({
+					message: "Admin session delegation is not configured on this server."
+				});
+				return;
+			}
+
+			response.locals.adminActor = buildLegacyAdminAuditActor(request) || {
+				displayName: "Development API key",
+				role: "admin",
+				username: "development-api-key"
+			} satisfies AdminAuditActor;
+			next();
+			return;
+		}
+
+		const token = parseAdminSessionToken(request.header("x-admin-session-token"), adminSessionSecret);
+
+		if (!token) {
+			response.status(401).json({
+				message: "Active admin session delegation required."
+			});
+			return;
+		}
+
+		const users = await adminRepository.listUsers();
+		const user = users.users.find(item => item.username === token.username);
+
+		if (
+			!user
+			|| user.disabledAt
+			|| user.credentialsUpdatedAt !== token.credentialsUpdatedAt
+			|| user.displayName !== token.displayName
+			|| user.role !== token.role
+		) {
+			response.status(401).json({
+				message: "Admin session delegation is no longer valid."
+			});
+			return;
+		}
+
+		response.locals.adminActor = {
+			displayName: user.displayName,
+			role: user.role,
+			username: user.username
+		} satisfies AdminAuditActor;
+		next();
+	});
+
 	app.post("/api/admin/auth/password", async (request, response) => {
 		const username = typeof request.body?.username === "string" ? request.body.username.trim().toLowerCase() : "";
 		const currentPassword = typeof request.body?.currentPassword === "string" ? request.body.currentPassword : "";
@@ -4440,6 +4523,9 @@ export async function createApp(options: CreateAppOptions = {}) {
 			return;
 		}
 
+		if (!requireSelfServiceActor(response, username))
+			return;
+
 		const user = await adminRepository.authenticateUser(username, currentPassword);
 
 		if (!user) {
@@ -4451,7 +4537,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 		try {
 			const users = await adminRepository.updateUser(user.id, {
-				auditActor: buildAdminAuditActor(request) || {
+				auditActor: getAdminAuditActor(response) || {
 					displayName: user.displayName,
 					role: user.role,
 					username: user.username
@@ -4479,7 +4565,10 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 	app.post("/api/admin/auth/mfa/setup", async (request, response) => {
 		try {
-			const username = typeof request.body?.username === "string" ? request.body.username : "";
+			const username = typeof request.body?.username === "string" ? request.body.username.trim().toLowerCase() : "";
+
+			if (!requireSelfServiceActor(response, username))
+				return;
 
 			response.json(await adminRepository.createMfaSetup(username));
 		}
@@ -4492,11 +4581,15 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 	app.post("/api/admin/auth/mfa/enable", async (request, response) => {
 		try {
-			const username = typeof request.body?.username === "string" ? request.body.username : "";
+			const username = typeof request.body?.username === "string" ? request.body.username.trim().toLowerCase() : "";
 			const currentPassword = typeof request.body?.currentPassword === "string" ? request.body.currentPassword : "";
 			const secret = typeof request.body?.secret === "string" ? request.body.secret : "";
 			const mfaCode = typeof request.body?.mfaCode === "string" ? request.body.mfaCode : "";
-			const user = await adminRepository.enableMfa(username, currentPassword, secret, mfaCode, buildAdminAuditActor(request));
+
+			if (!requireSelfServiceActor(response, username))
+				return;
+
+			const user = await adminRepository.enableMfa(username, currentPassword, secret, mfaCode, getAdminAuditActor(response));
 
 			response.json(buildAdminSessionResponse(user));
 		}
@@ -4509,10 +4602,14 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 	app.post("/api/admin/auth/mfa/disable", async (request, response) => {
 		try {
-			const username = typeof request.body?.username === "string" ? request.body.username : "";
+			const username = typeof request.body?.username === "string" ? request.body.username.trim().toLowerCase() : "";
 			const currentPassword = typeof request.body?.currentPassword === "string" ? request.body.currentPassword : "";
 			const mfaCode = typeof request.body?.mfaCode === "string" ? request.body.mfaCode : "";
-			const user = await adminRepository.disableMfa(username, currentPassword, mfaCode, buildAdminAuditActor(request));
+
+			if (!requireSelfServiceActor(response, username))
+				return;
+
+			const user = await adminRepository.disableMfa(username, currentPassword, mfaCode, getAdminAuditActor(response));
 
 			response.json(buildAdminSessionResponse(user));
 		}
@@ -5028,6 +5125,9 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.get("/api/admin/audit", async (_request, response) => {
+		if (!requireAdminRole(response))
+			return;
+
 		response.json(await adminRepository.listAuditEvents());
 	});
 
@@ -5083,7 +5183,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 				return;
 			}
 
-			response.json(await adminRepository.rollbackContent(request.params.id, historyId, buildAdminAuditActor(request)));
+			response.json(await adminRepository.rollbackContent(request.params.id, historyId, getAdminAuditActor(response)));
 		}
 		catch (error) {
 			response.status(400).json({
@@ -5095,7 +5195,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 	app.patch("/api/admin/content/:id", async (request, response) => {
 		try {
 			response.json(await adminRepository.updateContent(request.params.id, {
-				auditActor: buildAdminAuditActor(request),
+				auditActor: getAdminAuditActor(response),
 				assignedTo: typeof request.body?.assignedTo === "string" ? request.body.assignedTo : undefined,
 				blocker: request.body?.blocker === null
 					? null
@@ -5218,7 +5318,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			}
 
 			await adminRepository.updateGuidePackage(request.params.id, {
-				auditActor: buildAdminAuditActor(request),
+				auditActor: getAdminAuditActor(response),
 				coverageLimits: parseStringArray(request.body?.coverageLimits),
 				coverageNotes: parseStringArray(request.body?.coverageNotes),
 				draftedAt: typeof request.body?.draftedAt === "string" ? request.body.draftedAt : undefined,
@@ -5299,7 +5399,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			const now = new Date().toISOString();
 
 			await adminRepository.updateGuidePackage(request.params.id, {
-				auditActor: buildAdminAuditActor(request),
+				auditActor: getAdminAuditActor(response),
 				publishedAt: now,
 				reviewRecommendation,
 				reviewNotes: request.body?.reviewNotes === null
@@ -5338,7 +5438,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			}
 
 			await adminRepository.updateGuidePackage(request.params.id, {
-				auditActor: buildAdminAuditActor(request),
+				auditActor: getAdminAuditActor(response),
 				publishedAt: null,
 				reviewRecommendation: request.body?.reviewRecommendation === null
 					? null
@@ -5391,16 +5491,31 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.get("/api/admin/users", async (_request, response) => {
+		if (!requireAdminRole(response))
+			return;
+
 		response.json(await adminRepository.listUsers());
 	});
 
 	app.post("/api/admin/users", async (request, response) => {
+		if (!requireAdminRole(response))
+			return;
+
 		try {
+			const role = request.body?.role;
+
+			if (role !== "admin" && role !== "editor") {
+				response.status(400).json({
+					message: "Role must be either admin or editor."
+				});
+				return;
+			}
+
 			await adminRepository.createUser({
-				auditActor: buildAdminAuditActor(request),
+				auditActor: getAdminAuditActor(response),
 				displayName: typeof request.body?.displayName === "string" ? request.body.displayName : "",
 				password: typeof request.body?.password === "string" ? request.body.password : "",
-				role: request.body?.role === "editor" ? "editor" : "admin",
+				role,
 				username: typeof request.body?.username === "string" ? request.body.username : ""
 			});
 
@@ -5414,12 +5529,23 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.patch("/api/admin/users/:id", async (request, response) => {
+		if (!requireAdminRole(response))
+			return;
+
 		try {
+			if (request.body?.role !== undefined) {
+				response.status(400).json({
+					message: "Admin and editor roles are immutable. Create a replacement account when a different role is required."
+				});
+				return;
+			}
+
 			response.json(await adminRepository.updateUser(request.params.id, {
-				auditActor: buildAdminAuditActor(request),
+				auditActor: getAdminAuditActor(response),
 				disabled: typeof request.body?.disabled === "boolean" ? request.body.disabled : undefined,
 				mfaReset: request.body?.mfaReset === true ? true : undefined,
-				password: typeof request.body?.password === "string" ? request.body.password : undefined
+				password: typeof request.body?.password === "string" ? request.body.password : undefined,
+				passwordChangeMode: typeof request.body?.password === "string" ? "admin-reset" : undefined
 			}));
 		}
 		catch (error) {

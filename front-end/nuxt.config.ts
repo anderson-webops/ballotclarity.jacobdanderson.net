@@ -53,6 +53,7 @@ const securityHeaders = {
 };
 const noIndexHeaders = {
 	...securityHeaders,
+	"Cache-Control": "no-store, private",
 	"X-Robots-Tag": "noindex, nofollow"
 };
 const noIndexFollowHeaders = {
