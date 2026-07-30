@@ -12,6 +12,7 @@ The earlier Nuxt/Vite/esbuild advisory chain is resolved on the supported Nuxt 4
 - `npm ci --include=optional` and the native-binding verifier confirm that the committed lockfile installs the expected platform packages, including Linux ARM64 bindings.
 - `npm run verify:backend-lockfile` confirms the separately committed backend lockfile remains independently installable under its exact install-script policy.
 - Strict install-script enforcement makes clean installation fail if either dependency tree gains an unreviewed lifecycle script.
+- The backend pins `express-rate-limit@8.6.1` for the recognizable administrative route boundary and supplies its own tested bounded, fail-closed in-memory store rather than relying on an unbounded request-key map.
 - The local `vendor/archiver-nitro-compat` package preserves Nitro 2's default factory interface while delegating to `archiver@8.0.0`, removing the vulnerable Archiver 7 / Glob 10 / Minimatch 9 / Brace Expansion 2 chain.
 
 Nitro 2.13.4 still imports Archiver through the default factory removed in Archiver 8. The compatibility package is deliberately narrow, directly tested, and must be removed when Nitro adopts Archiver 8 or a later supported API. Clean install, full and production audits, build, and browser gates cover this bridge.

@@ -53,7 +53,7 @@ async function main() {
 		await runStep("Bootstrap local sqlite admin", "npm", ["run", "-w", "back-end", "bootstrap-admin:src"]);
 	}
 	else {
-		console.log(`\n== Bootstrap local sqlite admin ==\nSkipping bootstrap because ${sqlitePath} already exists.`);
+		console.log("\n== Bootstrap local sqlite admin ==\nSkipping bootstrap because the configured local admin store already exists.");
 	}
 
 	await runStep("Verify configured providers", "npm", ["run", "-w", "back-end", "providers:test:src"]);

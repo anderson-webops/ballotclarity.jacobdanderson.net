@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,6 +48,9 @@ try {
 	writeEnv(envPath, {
 		ADMIN_API_BASE: "http://127.0.0.1:3001/api",
 		ADMIN_API_KEY: secret(),
+		ADMIN_API_RATE_LIMIT_MAX: "1000",
+		ADMIN_API_RATE_LIMIT_MAX_BUCKETS: "10000",
+		ADMIN_API_RATE_LIMIT_WINDOW_MS: "900000",
 		ACTIVE_LOOKUP_COOKIE_SECRET: secret(),
 		ADDRESS_CACHE_ENCRYPTION_KEY: secret(),
 		ADMIN_DATABASE_URL: "postgres://ballotclarity:secret@db.internal:5432/ballotclarity",

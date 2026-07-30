@@ -6,6 +6,15 @@ import {
 	resolveContentSecurityPolicyApiSources,
 } from "../server/utils/content-security-policy.ts";
 
+function getDirectiveSources(policy: string, directiveName: string) {
+	const directive = policy
+		.split(";")
+		.map(item => item.trim())
+		.find(item => item.split(/\s+/u)[0] === directiveName);
+
+	return directive?.split(/\s+/u).slice(1) ?? [];
+}
+
 test("content security policy keeps production API origins exact", () => {
 	assert.deepEqual(
 		resolveContentSecurityPolicyApiSources("https://api.ballotclarity.org/api"),
@@ -22,7 +31,7 @@ test("only known framework and application inline scripts receive CSP hashes", (
 	const html = [
 		"<html><head>",
 		"<script type=\"importmap\">{\"imports\":{}}</script>",
-		"<script id=\"ballot-clarity-display-time-zone\" type=\"text/javascript\">timezone()</script>",
+		"<script id=\"ballot-clarity-display-time-zone\" type=\"text/javascript\">timezone()</script >",
 		"<script type=\"application/ld+json\" data-hid=\"jsonld-0\">{\"name\":\"Ballot Clarity\"}</script>",
 		"<script>\"use strict\";(()=>{window[\"__NUXT_COLOR_MODE__\"]={}})()</script>",
 		"<script>window.__NUXT__={};window.__NUXT__.config={}</script>",
@@ -42,6 +51,18 @@ test("only known framework and application inline scripts receive CSP hashes", (
 	});
 
 	assert.match(policy, /script-src 'self' 'sha256-/u);
-	assert.match(policy, /https:\/\/analytics\.ballotclarity\.org/u);
-	assert.doesNotMatch(policy.match(/script-src [^;]+/u)?.[0] ?? "", /'unsafe-inline'/u);
+	const scriptSources = new Set(getDirectiveSources(policy, "script-src"));
+	assert.equal(scriptSources.has("https://analytics.ballotclarity.org"), true);
+	assert.equal(scriptSources.has("'unsafe-inline'"), false);
+});
+
+test("malformed script closing tags fail closed", () => {
+	const html = [
+		"<html><head>",
+		"<script id=\"ballot-clarity-display-time-zone\">timezone()</scriptx>",
+		"<script id=\"ballot-clarity-deploy-recovery\">recovery()</script>",
+		"</head></html>",
+	].join("");
+
+	assert.deepEqual(collectTrustedInlineScriptHashes(html), []);
 });

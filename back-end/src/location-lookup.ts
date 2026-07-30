@@ -35,6 +35,30 @@ function normalizePlaceName(value: string | undefined) {
 		.trim();
 }
 
+export function buildLocationLookupSlug(value: string) {
+	let pendingSeparator = false;
+	let slug = "";
+
+	for (const character of value.toLowerCase()) {
+		const codePoint = character.codePointAt(0) ?? 0;
+		const isAsciiDigit = codePoint >= 48 && codePoint <= 57;
+		const isAsciiLetter = codePoint >= 97 && codePoint <= 122;
+
+		if (isAsciiDigit || isAsciiLetter) {
+			if (pendingSeparator && slug)
+				slug += "-";
+
+			slug += character;
+			pendingSeparator = false;
+		}
+		else {
+			pendingSeparator = Boolean(slug);
+		}
+	}
+
+	return slug;
+}
+
 export interface LookupGeoContext {
 	countyFips?: string;
 	countyName?: string;
@@ -79,7 +103,7 @@ function buildZipNationwideSelection(
 		lookupInput: geoContext?.postalCode || rawQuery,
 		lookupMode: "zip-preview",
 		requiresOfficialConfirmation: false,
-		slug: displayName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""),
+		slug: buildLocationLookupSlug(displayName),
 		state: state || ""
 	};
 }

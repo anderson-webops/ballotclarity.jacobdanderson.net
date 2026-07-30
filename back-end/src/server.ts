@@ -1,4 +1,4 @@
-import type { ErrorRequestHandler, Request, Response } from "express";
+import type { ErrorRequestHandler, Request, RequestHandler, Response } from "express";
 import type { AddressEnrichmentService } from "./address-enrichment.js";
 import type { AdminAuditActor } from "./admin-store.js";
 import type { CongressClient, CongressMemberDetail, CongressMemberRecord } from "./congress.js";
@@ -73,6 +73,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import cors from "cors";
 import express from "express";
+import { rateLimit } from "express-rate-limit";
 import {
 	buildActiveNationwideLookupContext,
 	buildActiveNationwideLookupCookie,
@@ -97,6 +98,7 @@ import { parseAdminSessionToken } from "./admin-session-token.js";
 import { normalizeAdminUsername } from "./admin-store.js";
 import { buildBallotContentProviderSummary, getPublicBallotContentProviderOptions } from "./ballot-content-providers.js";
 import { createBoundedPromiseCache, resolveBoundedCacheInteger } from "./bounded-promise-cache.js";
+import { BoundedRateLimitStore } from "./bounded-rate-limit-store.js";
 import { createCensusGeocoderClient } from "./census-geocoder.js";
 import { createCongressClient, isCurrentCongressMemberRecord } from "./congress.js";
 import { createCoverageRepository } from "./coverage-repository.js";
@@ -112,7 +114,7 @@ import { buildCoverageResponse } from "./launch-profile.js";
 import { createLdaClient } from "./lda.js";
 import { buildLocationGuessNotePrefix, createLocationGuessService } from "./location-guess.js";
 import { buildLocationLookupResponse, classifyLookupInput, findSupportedCoverageSummaries, validateLookupInput } from "./location-lookup.js";
-import { createLogger, createRequestLoggingMiddleware } from "./logger.js";
+import { createLogger, createRequestLoggingMiddleware, sanitizeLogText } from "./logger.js";
 import { getOfficialToolsForState, getStateAbbreviationForName, getStateNameForAbbreviation } from "./official-election-tools.js";
 import { createOpenFecClient } from "./openfec.js";
 import { createOpenStatesClient } from "./openstates.js";
@@ -137,6 +139,7 @@ import { createZipLookupLogger } from "./zip-lookup-logger.js";
 interface CreateAppOptions {
 	activeLookupCookieSecret?: string | null;
 	adminApiKey?: string | null;
+	adminApiRateLimiter?: RequestHandler;
 	adminDbPath?: string | null;
 	adminLoginThrottle?: ReturnType<typeof createAdminLoginThrottle>;
 	adminMfaEncryptionKey?: string | null;
@@ -167,6 +170,11 @@ interface CreateAppOptions {
 }
 
 type AdminLoginThrottleState = ReturnType<ReturnType<typeof createAdminLoginThrottle>["check"]>;
+
+function resolvePositiveIntegerEnv(name: string, fallback: number) {
+	const parsed = Number(process.env[name]);
+	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function isAuthorizedAdminRequest(requestKey: string | undefined, configuredKey: string | null) {
 	if (!requestKey || !configuredKey)
@@ -2949,6 +2957,36 @@ export async function createApp(options: CreateAppOptions = {}) {
 		sourceMonitorSeed: options.sourceMonitorSeed
 	});
 	const logger = createLogger("ballot-clarity-api");
+	const adminApiRateLimitWindowMs = resolvePositiveIntegerEnv(
+		"ADMIN_API_RATE_LIMIT_WINDOW_MS",
+		15 * 60 * 1000,
+	);
+	const adminApiRateLimit = resolvePositiveIntegerEnv("ADMIN_API_RATE_LIMIT_MAX", 1_000);
+	const adminApiRateLimitMaxBuckets = resolvePositiveIntegerEnv(
+		"ADMIN_API_RATE_LIMIT_MAX_BUCKETS",
+		10_000,
+	);
+	const adminApiRateLimiter = options.adminApiRateLimiter ?? rateLimit({
+		handler(request, response) {
+			logger.warn("admin.api.throttled", {
+				ip: buildPublicThrottleKey(request),
+				path: sanitizeLogText(request.path, 512),
+				requestId: response.locals.requestId,
+			});
+			response.status(429).json({
+				message: "Too many admin API requests. Try again later.",
+			});
+		},
+		identifier: "admin-api",
+		legacyHeaders: false,
+		limit: adminApiRateLimit,
+		passOnStoreError: false,
+		standardHeaders: "draft-8",
+		store: new BoundedRateLimitStore({
+			maxEntries: adminApiRateLimitMaxBuckets,
+		}),
+		windowMs: adminApiRateLimitWindowMs,
+	});
 	const publicFeedbackThrottle = options.publicFeedbackThrottle ?? createPublicRequestThrottle({
 		fallbackMaxBuckets: 10_000,
 		fallbackMaxRequests: 5,
@@ -4511,6 +4549,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 		strict: true
 	}));
 	app.use(createRequestLoggingMiddleware(logger));
+	app.use("/api/admin", adminApiRateLimiter);
 	const snapshotProvenance = buildCoverageSnapshotProvenance(coverageRepository);
 	logger.info("coverage.loaded", {
 		assetMode: sourceAssetStore.mode,

@@ -11,7 +11,6 @@ interface InlineScript {
 	body: string;
 }
 
-const inlineScriptPattern = /<script\b([^>]*)>([\s\S]*?)<\/script>/giu;
 const allowedScriptIds = new Set([
 	"ballot-clarity-deploy-recovery",
 	"ballot-clarity-display-time-zone",
@@ -19,6 +18,117 @@ const allowedScriptIds = new Set([
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const nuxtColorModeMarker = "__NUXT_COLOR_MODE__";
 const nuxtConfigScriptPattern = /^window\.__NUXT__=\{\};window\.__NUXT__\.config=/u;
+
+function isHtmlWhitespace(character: string | undefined) {
+	return character === " " || character === "\t" || character === "\n" || character === "\r" || character === "\f";
+}
+
+function isTagNameBoundary(character: string | undefined) {
+	return character === ">" || character === "/" || isHtmlWhitespace(character);
+}
+
+function findTagEnd(html: string, start: number) {
+	let quote = "";
+
+	for (let index = start; index < html.length; index += 1) {
+		const character = html[index] ?? "";
+
+		if (quote) {
+			if (character === quote)
+				quote = "";
+
+			continue;
+		}
+
+		if (character === "\"" || character === "'") {
+			quote = character;
+			continue;
+		}
+
+		if (character === ">")
+			return index;
+	}
+
+	return -1;
+}
+
+function findClosingScriptTag(html: string, lowerHtml: string, fromIndex: number) {
+	let searchIndex = fromIndex;
+
+	while (searchIndex < html.length) {
+		const start = lowerHtml.indexOf("</script", searchIndex);
+
+		if (start < 0)
+			return null;
+
+		let end = start + "</script".length;
+
+		if (!isTagNameBoundary(html[end])) {
+			searchIndex = end;
+			continue;
+		}
+
+		while (isHtmlWhitespace(html[end]))
+			end += 1;
+
+		if (html[end] === ">")
+			return { end, start };
+
+		searchIndex = end;
+	}
+
+	return null;
+}
+
+function collectInlineScripts(html: string) {
+	const lowerHtml = html.toLowerCase();
+	const scripts: InlineScript[] = [];
+	let searchIndex = 0;
+
+	while (searchIndex < html.length) {
+		const start = lowerHtml.indexOf("<script", searchIndex);
+
+		if (start < 0)
+			break;
+
+		const attributesStart = start + "<script".length;
+
+		if (!isTagNameBoundary(html[attributesStart])) {
+			searchIndex = attributesStart;
+			continue;
+		}
+
+		const openingEnd = findTagEnd(html, attributesStart);
+
+		if (openingEnd < 0)
+			break;
+
+		const attributes = html.slice(attributesStart, openingEnd);
+
+		if (attributes.trimEnd().endsWith("/")) {
+			searchIndex = openingEnd + 1;
+			continue;
+		}
+
+		const closingTag = findClosingScriptTag(html, lowerHtml, openingEnd + 1);
+
+		if (!closingTag)
+			break;
+
+		const nestedOpeningTag = lowerHtml.indexOf("<script", openingEnd + 1);
+
+		if (nestedOpeningTag >= 0 && nestedOpeningTag < closingTag.start)
+			break;
+
+		scripts.push({
+			attributes,
+			body: html.slice(openingEnd + 1, closingTag.start),
+		});
+		searchIndex = closingTag.end + 1;
+	}
+
+	return scripts;
+}
 
 function uniqueSourceList(...sources: string[]) {
 	return Array.from(new Set(sources.filter(Boolean))).join(" ");
@@ -85,12 +195,7 @@ export function resolveContentSecurityPolicyApiSources(publicApiBase: string) {
 export function collectTrustedInlineScriptHashes(html: string) {
 	const hashes = new Set<string>();
 
-	for (const match of html.matchAll(inlineScriptPattern)) {
-		const script = {
-			attributes: match[1] ?? "",
-			body: match[2] ?? "",
-		};
-
+	for (const script of collectInlineScripts(html)) {
 		if (!isTrustedInlineScript(script))
 			continue;
 

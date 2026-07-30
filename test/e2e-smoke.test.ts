@@ -934,8 +934,9 @@ test("built app renders the key ballot guide pages against the built API", async
 	assert.match(privacyHtml, /Google Civic Information API/);
 	assert.match(privacyHtml, /Rights requests and no-account limits/);
 	assert.match(privacyHtml, /Children(?:&#39;|&apos;|’|')s privacy/);
-	assert.match(privacyHtml, /analytics\.ballotclarity\.org/);
-	assert.doesNotMatch(privacyHtml, /analytics\.jacobdanderson\.net/);
+	const privacyTokens = new Set(privacyHtml.split(/[^A-Za-z0-9.-]+/u));
+	assert.equal(privacyTokens.has("analytics.ballotclarity.org"), true);
+	assert.equal(privacyTokens.has("analytics.jacobdanderson.net"), false);
 	assert.equal(termsPage.status, 200);
 	assert.match(termsHtml, /Terms of Service/);
 	assert.match(termsHtml, /How the service may and may not be used/);

@@ -38,6 +38,11 @@ export interface ActiveNationwideLookupContext {
 	result: "resolved";
 }
 
+declare const sealedActiveLookupCookieBrand: unique symbol;
+export type SealedActiveNationwideLookupCookie = string & {
+	readonly [sealedActiveLookupCookieBrand]: true;
+};
+
 export const activeNationwideLookupCookieName = "ballot-clarity-nationwide-lookup";
 const cookieMaxAgeSeconds = 60 * 60 * 24 * 7;
 const activeLookupCookiePurpose = "ballot-clarity:active-lookup-cookie:v1";
@@ -989,7 +994,11 @@ export function buildActiveNationwideLookupCookieFromContext(
 	if (!sanitizedContext || !secret.trim())
 		return null;
 
-	return sealSecretJson(buildCookiePayload(sanitizedContext), secret, activeLookupCookiePurpose);
+	return sealSecretJson(
+		buildCookiePayload(sanitizedContext),
+		secret,
+		activeLookupCookiePurpose,
+	) as SealedActiveNationwideLookupCookie;
 }
 
 export function readActiveNationwideLookupContext(
@@ -1052,7 +1061,9 @@ export function clearActiveNationwideLookupCookie(response: {
 
 export function persistActiveNationwideLookupCookie(response: {
 	cookie: (name: string, value: string, options?: Record<string, unknown>) => void;
-}, value: string) {
+}, value: SealedActiveNationwideLookupCookie) {
+	// The value is authenticated ciphertext produced by sealSecretJson, never raw lookup input.
+	// codeql[js/clear-text-storage-of-sensitive-data]
 	response.cookie(activeNationwideLookupCookieName, value, {
 		httpOnly: true,
 		maxAge: cookieMaxAgeSeconds * 1000,

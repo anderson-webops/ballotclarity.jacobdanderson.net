@@ -119,7 +119,7 @@ async function main() {
 	}, cwd);
 	const baseUrl = `http://127.0.0.1:${port}`;
 
-	console.log(`Local API base: ${env.NUXT_PUBLIC_API_BASE}`);
+	console.log(`Local API base: ${baseUrl}/api`);
 	await runStep("Seed local coverage snapshot", "npm", ["run", "-w", "back-end", "export-seed-coverage:src"], { cwd, env });
 	await runStep("Verify configured providers", "npm", ["run", "-w", "back-end", "providers:test:src"], { cwd, env });
 

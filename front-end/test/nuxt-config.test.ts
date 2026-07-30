@@ -7,6 +7,15 @@ import { analyticsTrackers, appDescription, appName, appSocialImageAlt, appSocia
 import { staleClientBuildStorageKey } from "../src/utils/deploy-recovery.ts";
 import { displayTimeZoneCookieName } from "../src/utils/display-time-zone.ts";
 
+function getLastHostnameLabels(value: string, count: number) {
+	try {
+		return new URL(value).hostname.toLowerCase().split(".").slice(-count).join(".");
+	}
+	catch {
+		return "";
+	}
+}
+
 function collectVueFiles(directory: string): string[] {
 	return readdirSync(directory)
 		.flatMap((entry) => {
@@ -74,7 +83,7 @@ test("nuxt config uses srcDir and expected civic modules", async () => {
 		}))
 	);
 	assert.ok(!config.app?.head?.script?.some(script =>
-		typeof script.src === "string" && script.src.includes("jacobdanderson.net")
+		typeof script.src === "string" && getLastHostnameLabels(script.src, 2) === "jacobdanderson.net"
 	));
 	assert.ok(config.app?.head?.link?.some(link => link.rel === "manifest" && typeof link.href === "string" && link.href.startsWith("/site.webmanifest")));
 	const contentSecurityPolicy = config.nitro?.routeRules?.["/**"]?.headers?.["content-security-policy"];
@@ -142,7 +151,7 @@ test("public SEO metadata has an available share image", () => {
 	assert.match(seoComposable, /twitterImageAlt: appSocialImageAlt/);
 	assert.match(appSocialImageAlt, /Ballot Clarity preview card/);
 	assert.match(socialCard, /Civic information/);
-	assert.match(socialCard, /ballotclarity\.org/);
+	assert.equal(socialCard.includes(">ballotclarity.org</text>"), true);
 });
 
 test("lookup-dependent routes stay out of public search indexes without blocking ballot follow rules", () => {

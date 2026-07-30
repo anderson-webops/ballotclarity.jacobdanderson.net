@@ -29,9 +29,9 @@ Guide publication requires an authenticated administrator with enrolled MFA, a s
 - Made account mutations transactional and protected the last active administrator under concurrent requests.
 - Encrypted MFA seeds and cached address payloads with dedicated authenticated-encryption secrets; address lookup keys are keyed hashes rather than plaintext.
 - Added forced password rotation for administrator-issued credentials, bounded credential fields, constant-time API-key and session-signature checks, and session invalidation on every credential-state change.
-- Added independent bounded account and network-address throttles for login, password, and MFA verification.
+- Added a standardized coarse per-connection limiter across every private admin API request, backed by a bounded fail-closed store, plus independent stricter account and network-address throttles for login, password, and MFA verification.
 - Added strict same-origin mutation checks at the Nuxt bridge, secure `HttpOnly`/`SameSite=Strict` production cookies, private/no-store admin responses, restrictive CORS, and browser security headers.
-- Enforced script CSP with per-response hashes for only the known Nuxt and Ballot Clarity bootstrap scripts. Unknown inline scripts remain blocked; production API connectivity is restricted to the configured runtime origin.
+- Enforced script CSP with per-response hashes for only the known Nuxt and Ballot Clarity bootstrap scripts. The inline-script scanner handles HTML whitespace and malformed closing tags conservatively and fails closed on ambiguous nesting. Unknown inline scripts remain blocked; production API connectivity is restricted to the configured runtime origin.
 - Added strict JSON content types and 64 KiB body ceilings at both public Express and private Nuxt server boundaries.
 - Bounded public feedback, civic lookup, protected-contact, saved lookup, and direct provider-backed representative requests; all in-memory bucket maps fail closed at capacity.
 - Added deadlines and a 5 MiB decoded-body ceiling to every civic-provider response, including the custom IPv4 Google transport.
@@ -43,7 +43,18 @@ Guide publication requires an authenticated administrator with enrolled MFA, a s
 - Aligned local, CI, and package metadata on Node 24.18.0 LTS with npm 11.16.0; optional native packages are installed and checked on Linux ARM64.
 - Replaced Nitro's vulnerable Archiver 7 dependency path with a tested local compatibility bridge backed by Archiver 8.
 - Made the backend incremental compiler cache part of the disposable build output and added a post-build import-closure check so a stale cache cannot produce an incomplete deploy artifact.
-- Pinned CI actions by commit, added CodeQL, Dependabot, zero-exception full and production audits, and explicit install-script approvals.
+- Made local `.env` generation exclusive and symlink-safe, with owner-only permissions and atomic replacement for an explicit `--force`; local setup and verification commands no longer print environment-derived paths or values.
+- Replaced provider-derived slug regular expressions with a bounded single-pass normalizer and structured launch-directory logging with control-character removal.
+- Pinned CI actions by commit, required SHA-pinned Actions at the repository level, added CodeQL and zero-exception full and production audits, enabled Dependabot alerts/security updates, secret scanning with push protection, and private vulnerability reporting, and kept install-script approvals explicit.
+
+## Code-scanning interpretation
+
+Two precise CodeQL suppressions document cryptographic uses that are safe but are not distinguishable from credential handling through field-name taint alone:
+
+- SHA-256 in the SQLite and Postgres admin stores links immutable audit records into a tamper-evident chain. It does not hash passwords; account passwords use scrypt.
+- The saved nationwide-lookup cookie sink receives only authenticated ciphertext returned by the dedicated secret-envelope function. Raw address input is excluded from the compact cookie payload and is never passed to the cookie writer.
+
+All other findings from the security-extended scan are remediated in executable source or tests rather than dismissed in the repository dashboard.
 
 ## Production operator requirements
 

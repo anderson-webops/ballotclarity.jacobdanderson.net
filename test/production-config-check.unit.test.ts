@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -96,9 +96,8 @@ function writeSnapshot(
 	overrides: Record<string, unknown> = {},
 	payload: Record<string, unknown> = buildMinimalCoverageSnapshot(),
 ) {
-	const root = join(tmpdir(), `ballot-clarity-prod-check-${randomUUID()}`);
+	const root = mkdtempSync(join(tmpdir(), "ballot-clarity-prod-check-"));
 	const snapshotPath = join(root, "live-coverage.active.json");
-	mkdirSync(root, { recursive: true });
 	writeFileSync(snapshotPath, JSON.stringify(payload), "utf8");
 	writeFileSync(`${snapshotPath}.meta.json`, JSON.stringify({
 		approvedAt: status === "production_approved" ? "2026-04-19T19:36:50.252Z" : undefined,
@@ -120,6 +119,9 @@ function buildProductionEnv(overrides: Record<string, string | undefined> = {}) 
 		ADMIN_API_BASE: "http://127.0.0.1:3001/api",
 		ADMIN_API_FETCH_TIMEOUT_MS: "15000",
 		ADMIN_API_KEY: "a".repeat(48),
+		ADMIN_API_RATE_LIMIT_MAX: "1000",
+		ADMIN_API_RATE_LIMIT_MAX_BUCKETS: "10000",
+		ADMIN_API_RATE_LIMIT_WINDOW_MS: "900000",
 		ADMIN_DATABASE_URL: "postgres://ballotclarity:secret@db.internal:5432/ballotclarity",
 		ADMIN_LOGIN_LOCKOUT_MS: "1800000",
 		ADMIN_LOGIN_IP_MAX_ATTEMPTS: "25",
@@ -300,6 +302,9 @@ test("production config check fails invalid throttle values", () => {
 	const evaluation = evaluateProductionConfig({
 		env: buildProductionEnv({
 			ADMIN_API_FETCH_TIMEOUT_MS: "forever",
+			ADMIN_API_RATE_LIMIT_MAX: "unbounded",
+			ADMIN_API_RATE_LIMIT_MAX_BUCKETS: "0",
+			ADMIN_API_RATE_LIMIT_WINDOW_MS: "-1",
 			ADDRESS_CACHE_MAX_ROWS: "unbounded",
 			ADMIN_LOGIN_LOCKOUT_MS: "-1000",
 			ADMIN_LOGIN_IP_MAX_ATTEMPTS: "none",
@@ -342,6 +347,9 @@ test("production config check fails invalid throttle values", () => {
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_max_buckets.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_window_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_api_fetch_timeout_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("admin_api_rate_limit_max.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("admin_api_rate_limit_max_buckets.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("admin_api_rate_limit_window_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("contact_address_rate_limit_max.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("contact_address_rate_limit_max_buckets.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("contact_address_rate_limit_window_ms.invalid"));

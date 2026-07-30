@@ -203,6 +203,7 @@ Server-only variables:
 - `ADMIN_API_BASE`: server-side Nuxt proxy target for admin-only API requests; this should be private to the Nuxt server and never exposed as the browser's direct `/api/admin/*` target
 - `ADMIN_API_FETCH_TIMEOUT_MS`: positive server-to-server admin API request timeout in milliseconds; defaults to 15 seconds
 - `ADMIN_API_KEY`: shared secret between the Nuxt admin proxy and the Express admin endpoints
+- `ADMIN_API_RATE_LIMIT_WINDOW_MS`, `ADMIN_API_RATE_LIMIT_MAX`, `ADMIN_API_RATE_LIMIT_MAX_BUCKETS`: coarse per-connection limit across all private admin API requests; the bounded in-memory store defaults to 1,000 requests per 15 minutes and fails closed for unseen connections when its 10,000-bucket cap is full
 - `ADMIN_SESSION_SECRET`: cookie-signing secret for Nuxt admin sessions
 - `ADMIN_MFA_ENCRYPTION_KEY`: dedicated authenticated-encryption key for admin TOTP seeds at rest; use a unique random value of at least 32 characters
 - `ACTIVE_LOOKUP_COOKIE_SECRET`: dedicated authenticated-encryption secret for the HttpOnly saved-area result cookie; use a unique random value of at least 32 characters

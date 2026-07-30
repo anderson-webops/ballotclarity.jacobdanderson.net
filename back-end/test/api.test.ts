@@ -1909,7 +1909,7 @@ test("POST /api/location filters former Congress members out of ZIP lookup repre
 	assert.equal(representativeNames.some((name: string) => /mccormick/i.test(name)), true);
 	assert.equal(representativeNames.includes("Richard Russell"), false);
 	assert.equal(representativeNames.includes("Rob Woodall"), false);
-	assert.equal(representativeSources.includes("Congress.gov"), true);
+	assert.equal(new Set(representativeSources).has("Congress.gov"), true);
 	assert.equal(findRepresentative(/^Jon Ossoff$/i)?.governmentLevel, "federal");
 	assert.equal(findRepresentative(/^Jon Ossoff$/i)?.officeType, "us_senate");
 	assert.equal(findRepresentative(/warnock/i)?.governmentLevel, "federal");
@@ -3157,6 +3157,8 @@ test("GET /api/admin/overview rejects unauthenticated access", async () => {
 	const body = await response.json();
 
 	assert.equal(response.status, 401);
+	assert.equal(response.headers.get("ratelimit")?.split(";")[0], "\"admin-api\"");
+	assert.equal(response.headers.get("ratelimit-policy")?.split(";")[0], "\"admin-api\"");
 	assert.match(body.message, /Unauthorized admin request/i);
 });
 

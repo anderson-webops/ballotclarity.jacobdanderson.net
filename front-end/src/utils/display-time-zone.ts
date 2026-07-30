@@ -75,5 +75,5 @@ export function formatCivicDateTime(value: string, timeZone: string | null | und
 }
 
 export function buildPreHydrationDisplayTimeZoneScript() {
-	return `(function(){try{var timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;if(!timezone)return;document.documentElement.setAttribute(${JSON.stringify(displayTimeZoneHtmlAttribute)},timezone);document.cookie=${JSON.stringify(`${displayTimeZoneCookieName}=`)}+encodeURIComponent(timezone)+'; path=/; max-age=31536000; samesite=lax';}catch{}})();`;
+	return "(function(){try{var timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;if(!timezone)return;document.documentElement.setAttribute(\"data-display-time-zone\",timezone);document.cookie=\"ballot-clarity-display-time-zone=\"+encodeURIComponent(timezone)+\"; path=/; max-age=31536000; samesite=lax\";}catch{}})();";
 }

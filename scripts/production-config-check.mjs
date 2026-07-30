@@ -17,9 +17,9 @@ const weakSecretValues = new Set([
 	"secret",
 	"test",
 ]);
-const emailAddressPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
-const weakSecretPattern = /(?:example|placeholder|replace[-_ ]?with)/iu;
-const weakPublicTextPattern = /(?:example|placeholder|replace[-_ ]?with|tbd|todo|coming soon)/iu;
+const emailAddressPattern = /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/u;
+const weakSecretPattern = /example|placeholder|replace[-_ ]?with/iu;
+const weakPublicTextPattern = /example|placeholder|replace[-_ ]?with|tbd|todo|coming soon/iu;
 const referenceArchiveCandidateNames = [
 	"Elena Torres",
 	"Daniel Brooks",
@@ -923,6 +923,21 @@ export function evaluateProductionConfig({
 		errors,
 		key: "PUBLIC_LOOKUP_RATE_LIMIT_MAX_BUCKETS",
 		value: env.PUBLIC_LOOKUP_RATE_LIMIT_MAX_BUCKETS,
+	});
+	checkPositiveInteger({
+		errors,
+		key: "ADMIN_API_RATE_LIMIT_WINDOW_MS",
+		value: env.ADMIN_API_RATE_LIMIT_WINDOW_MS,
+	});
+	checkPositiveInteger({
+		errors,
+		key: "ADMIN_API_RATE_LIMIT_MAX",
+		value: env.ADMIN_API_RATE_LIMIT_MAX,
+	});
+	checkPositiveInteger({
+		errors,
+		key: "ADMIN_API_RATE_LIMIT_MAX_BUCKETS",
+		value: env.ADMIN_API_RATE_LIMIT_MAX_BUCKETS,
 	});
 	checkPositiveInteger({
 		errors,
