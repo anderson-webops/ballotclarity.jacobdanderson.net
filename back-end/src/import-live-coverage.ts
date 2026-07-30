@@ -1,45 +1,46 @@
 import type { CoverageSnapshotMetadata } from "./coverage-repository.js";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import {
 	parseCoverageSnapshot,
 	writeCoverageSnapshot,
 	writeCoverageSnapshotMetadata,
 } from "./coverage-repository.js";
+import { fetchRemoteJsonText } from "./remote-json-source.js";
 
-function readFlag(flag: string) {
-	const index = process.argv.indexOf(flag);
+function readFlag(flag: string, argv = process.argv) {
+	const index = argv.indexOf(flag);
 
 	if (index === -1)
 		return undefined;
 
-	return process.argv[index + 1];
+	return argv[index + 1];
 }
 
-async function readSourcePayload() {
-	const filePath = readFlag("--from-file") || process.env.LIVE_COVERAGE_SOURCE_FILE;
-	const sourceUrl = readFlag("--from-url") || process.env.LIVE_COVERAGE_SOURCE_URL;
+export async function readSourcePayload(argv = process.argv) {
+	const filePath = readFlag("--from-file", argv) || process.env.LIVE_COVERAGE_SOURCE_FILE;
+	const sourceUrl = readFlag("--from-url", argv) || process.env.LIVE_COVERAGE_SOURCE_URL;
 
 	if (filePath)
 		return readFileSync(filePath, "utf8");
 
 	if (sourceUrl) {
-		const response = await fetch(sourceUrl);
-
-		if (!response.ok)
-			throw new Error(`Unable to fetch live coverage snapshot: ${response.status} ${response.statusText}`);
-
-		return await response.text();
+		return await fetchRemoteJsonText(sourceUrl, {
+			maxBytes: Number(process.env.LIVE_COVERAGE_FETCH_MAX_BYTES || 5 * 1024 * 1024),
+			timeoutMs: Number(process.env.LIVE_COVERAGE_FETCH_TIMEOUT_MS || 15_000),
+		});
 	}
 
 	throw new Error("Specify --from-file <path> or --from-url <url> when importing live coverage.");
 }
 
-function buildMetadata(): CoverageSnapshotMetadata {
-	const status = readFlag("--status") || process.env.LIVE_COVERAGE_STATUS || "reviewed";
-	const sourceLabel = readFlag("--source-label") || process.env.LIVE_COVERAGE_SOURCE_LABEL || "Imported live coverage snapshot";
-	const sourceOrigin = readFlag("--source-origin") || process.env.LIVE_COVERAGE_SOURCE_ORIGIN;
-	const note = readFlag("--note") || process.env.LIVE_COVERAGE_NOTE;
+function buildMetadata(argv = process.argv): CoverageSnapshotMetadata {
+	const status = readFlag("--status", argv) || process.env.LIVE_COVERAGE_STATUS || "reviewed";
+	const sourceLabel = readFlag("--source-label", argv) || process.env.LIVE_COVERAGE_SOURCE_LABEL || "Imported live coverage snapshot";
+	const sourceOrigin = readFlag("--source-origin", argv) || process.env.LIVE_COVERAGE_SOURCE_ORIGIN;
+	const note = readFlag("--note", argv) || process.env.LIVE_COVERAGE_NOTE;
 	const now = new Date().toISOString();
 
 	if (status !== "production_approved" && status !== "reviewed" && status !== "seed" && status !== "unknown")
@@ -57,14 +58,14 @@ function buildMetadata(): CoverageSnapshotMetadata {
 	};
 }
 
-async function main() {
+export async function runImportLiveCoverage(argv = process.argv) {
 	try {
-		const snapshot = parseCoverageSnapshot(JSON.parse(await readSourcePayload()));
+		const snapshot = parseCoverageSnapshot(JSON.parse(await readSourcePayload(argv)));
 		const outputPath = writeCoverageSnapshot(
 			snapshot,
-			readFlag("--output") || process.env.LIVE_COVERAGE_FILE || undefined
+			readFlag("--output", argv) || process.env.LIVE_COVERAGE_FILE || undefined
 		);
-		const metadataPath = writeCoverageSnapshotMetadata(buildMetadata(), outputPath);
+		const metadataPath = writeCoverageSnapshotMetadata(buildMetadata(argv), outputPath);
 
 		console.log(`Imported live coverage snapshot to ${outputPath}.`);
 		console.log(`Wrote coverage snapshot metadata to ${metadataPath}.`);
@@ -75,4 +76,7 @@ async function main() {
 	}
 }
 
-void main();
+const isDirectRun = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isDirectRun)
+	void runImportLiveCoverage();

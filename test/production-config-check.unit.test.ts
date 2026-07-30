@@ -128,6 +128,8 @@ function buildProductionEnv(overrides: Record<string, string | undefined> = {}) 
 		ADMIN_STORE_DRIVER: "postgres",
 		CONTACT_ADDRESS: "hello@ballotclarity.org",
 		CONTACT_ADDRESS_SESSION_SECRET: "c".repeat(48),
+		LIVE_COVERAGE_FETCH_MAX_BYTES: "5242880",
+		LIVE_COVERAGE_FETCH_TIMEOUT_MS: "15000",
 		LIVE_COVERAGE_FILE: writeSnapshot(),
 		LIVE_COVERAGE_REQUIRED: "true",
 		NUXT_PUBLIC_API_BASE: "https://ballotclarity.org/api/",
@@ -279,6 +281,8 @@ test("production config check fails invalid throttle values", () => {
 			ADMIN_LOGIN_IP_MAX_ATTEMPTS: "none",
 			ADMIN_LOGIN_MAX_ATTEMPTS: "many",
 			ADMIN_LOGIN_WINDOW_MS: "0",
+			LIVE_COVERAGE_FETCH_MAX_BYTES: "unbounded",
+			LIVE_COVERAGE_FETCH_TIMEOUT_MS: "-1",
 			PUBLIC_FEEDBACK_RATE_LIMIT_MAX: "0",
 			PUBLIC_FEEDBACK_RATE_LIMIT_WINDOW_MS: "ten-minutes",
 			PUBLIC_LOOKUP_RATE_LIMIT_MAX: "60.5",
@@ -291,6 +295,8 @@ test("production config check fails invalid throttle values", () => {
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_max_attempts.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_ip_max_attempts.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_window_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("live_coverage_fetch_max_bytes.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("live_coverage_fetch_timeout_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_feedback_rate_limit_max.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_feedback_rate_limit_window_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_lookup_rate_limit_max.invalid"));

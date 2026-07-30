@@ -771,6 +771,16 @@ export function evaluateProductionConfig({
 	});
 	checkPositiveInteger({
 		errors,
+		key: "LIVE_COVERAGE_FETCH_TIMEOUT_MS",
+		value: env.LIVE_COVERAGE_FETCH_TIMEOUT_MS,
+	});
+	checkPositiveInteger({
+		errors,
+		key: "LIVE_COVERAGE_FETCH_MAX_BYTES",
+		value: env.LIVE_COVERAGE_FETCH_MAX_BYTES,
+	});
+	checkPositiveInteger({
+		errors,
 		key: "PUBLIC_LOOKUP_RATE_LIMIT_MAX",
 		value: env.PUBLIC_LOOKUP_RATE_LIMIT_MAX,
 	});

@@ -14,6 +14,7 @@ It checks the environment values and active coverage snapshot that determine whe
 - `CONTACT_ADDRESS_SESSION_SECRET` or `NUXT_CONTACT_ADDRESS_SESSION_SECRET` is present, long enough, and not an obvious placeholder value.
 - `NUXT_PUBLIC_OPERATOR_LEGAL_NAME`, `NUXT_PUBLIC_GOVERNING_LAW`, and `NUXT_PUBLIC_VENUE` are explicitly configured for production Terms and Privacy copy and do not contain placeholder text.
 - Optional public feedback, public lookup, and admin login throttle values are positive integers when set.
+- Optional remote coverage import timeout and response-size ceilings are positive integers when set.
 - `TRUST_PROXY` names explicit trusted proxy IPs, CIDR ranges, or named ranges; broad boolean and hop-count trust is rejected.
 - Optional ballot-content provider endpoint URLs use HTTPS, are valid absolute URLs, and do not point at localhost, reserved placeholder domains, private IP ranges, or internal-only hostnames when set.
 - Optional ballot-content provider keys and endpoints are paired where the connector would otherwise be ignored or incomplete.

@@ -59,6 +59,8 @@ try {
 		ADMIN_STORE_DRIVER: "postgres",
 		CONTACT_ADDRESS: "hello@ballotclarity.org",
 		CONTACT_ADDRESS_SESSION_SECRET: secret(),
+		LIVE_COVERAGE_FETCH_MAX_BYTES: "5242880",
+		LIVE_COVERAGE_FETCH_TIMEOUT_MS: "15000",
 		LIVE_COVERAGE_FILE: snapshotPath,
 		LIVE_COVERAGE_REQUIRED: "true",
 		NUXT_PUBLIC_API_BASE: "https://ballotclarity.org/api/",

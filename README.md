@@ -238,7 +238,8 @@ Runtime variable:
 One-time or scheduled ingestion variables:
 
 - `LIVE_COVERAGE_SOURCE_FILE`: local JSON file path consumed by `npm run ingest:coverage`
-- `LIVE_COVERAGE_SOURCE_URL`: remote JSON URL consumed by `npm run ingest:coverage`
+- `LIVE_COVERAGE_SOURCE_URL`: public HTTPS JSON URL consumed by `npm run ingest:coverage`; private/local/reserved destinations and unsafe redirects are rejected, so use `--from-file` for privately retrieved snapshots
+- `LIVE_COVERAGE_FETCH_TIMEOUT_MS`, `LIVE_COVERAGE_FETCH_MAX_BYTES`: remote coverage import time and response-size ceilings
 - `DATA_API_KEY`: shared `api.data.gov` credential used as a fallback for Congress.gov and OpenFEC
 - `LAUNCH_DIRECTORY_FILE`: local JSON file written by `npm run launch-directory:sync`
 - `LAUNCH_PROFILE_LATITUDE`, `LAUNCH_PROFILE_LONGITUDE`: optional probe point used for launch-area Open States geo matching in the launch-directory snapshot
