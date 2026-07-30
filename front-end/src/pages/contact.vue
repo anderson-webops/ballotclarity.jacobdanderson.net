@@ -118,6 +118,8 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Name</span>
 							<input
 								v-model="form.name"
+								autocomplete="name"
+								maxlength="120"
 								type="text"
 								class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							>
@@ -126,6 +128,8 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Email</span>
 							<input
 								v-model="form.email"
+								autocomplete="email"
+								maxlength="254"
 								type="email"
 								required
 								class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
@@ -137,6 +141,7 @@ usePageSeo({
 						<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Subject</span>
 						<input
 							v-model="form.subject"
+							maxlength="160"
 							type="text"
 							required
 							class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
@@ -147,6 +152,7 @@ usePageSeo({
 						<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Page URL or site path</span>
 						<input
 							v-model="form.pageUrl"
+							maxlength="1024"
 							type="text"
 							placeholder="/representatives/jon-ossoff"
 							class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
@@ -157,6 +163,7 @@ usePageSeo({
 						<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Message</span>
 						<textarea
 							v-model="form.message"
+							maxlength="5000"
 							required
 							rows="5"
 							class="text-sm text-app-ink mt-2 px-4 py-3 border border-app-line rounded-2xl bg-white min-h-32 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
@@ -167,6 +174,7 @@ usePageSeo({
 						<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Supporting links</span>
 						<textarea
 							v-model="form.sourceLinks"
+							maxlength="20489"
 							rows="3"
 							placeholder="One link per line"
 							class="text-sm text-app-ink mt-2 px-4 py-3 border border-app-line rounded-2xl bg-white min-h-24 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"

@@ -6,16 +6,32 @@ interface AttemptState {
 	lockedUntil: number;
 }
 
+interface AdminLoginThrottleOptions {
+	accountMaxAttempts?: number;
+	ipMaxAttempts?: number;
+	lockoutMs?: number;
+	windowMs?: number;
+}
+
 function getNumberEnv(name: string, fallback: number) {
 	const raw = Number(process.env[name]);
 	return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
-export function createAdminLoginThrottle() {
+function normalizeUsername(username: string) {
+	return username.trim().toLowerCase().slice(0, 128) || "unknown";
+}
+
+function normalizeIp(ip: string) {
+	return ip.trim().toLowerCase().slice(0, 128) || "unknown";
+}
+
+export function createAdminLoginThrottle(options: AdminLoginThrottleOptions = {}) {
 	const attempts = new Map<string, AttemptState>();
-	const windowMs = getNumberEnv("ADMIN_LOGIN_WINDOW_MS", 15 * 60 * 1000);
-	const maxAttempts = getNumberEnv("ADMIN_LOGIN_MAX_ATTEMPTS", 5);
-	const lockoutMs = getNumberEnv("ADMIN_LOGIN_LOCKOUT_MS", 30 * 60 * 1000);
+	const windowMs = options.windowMs ?? getNumberEnv("ADMIN_LOGIN_WINDOW_MS", 15 * 60 * 1000);
+	const accountMaxAttempts = options.accountMaxAttempts ?? getNumberEnv("ADMIN_LOGIN_MAX_ATTEMPTS", 5);
+	const ipMaxAttempts = options.ipMaxAttempts ?? getNumberEnv("ADMIN_LOGIN_IP_MAX_ATTEMPTS", 25);
+	const lockoutMs = options.lockoutMs ?? getNumberEnv("ADMIN_LOGIN_LOCKOUT_MS", 30 * 60 * 1000);
 
 	function prune(now: number) {
 		for (const [key, state] of attempts.entries()) {
@@ -27,49 +43,67 @@ export function createAdminLoginThrottle() {
 		}
 	}
 
-	function normalizeKey(username: string, ip: string) {
-		const normalizedIp = ip.split(",")[0]?.trim().toLowerCase() || "unknown";
-		return `${normalizedIp}::${username.trim().toLowerCase()}`;
+	function getAttemptKeys(username: string, ip: string) {
+		return {
+			accountKey: `account:${normalizeUsername(username)}`,
+			ipKey: `ip:${normalizeIp(ip)}`,
+		};
+	}
+
+	function getMaximumAttempts(key: string) {
+		return key.startsWith("ip:") ? ipMaxAttempts : accountMaxAttempts;
 	}
 
 	return {
 		check(username: string, ip: string) {
 			const now = Date.now();
 			prune(now);
-			const key = normalizeKey(username, ip);
-			const state = attempts.get(key);
+			const { accountKey, ipKey } = getAttemptKeys(username, ip);
+			const keys = [accountKey, ipKey];
+			const retryAfterSeconds = keys.reduce((maximum, key) => {
+				const state = attempts.get(key);
 
-			if (!state || state.lockedUntil <= now)
-				return { allowed: true, key, retryAfterSeconds: 0 };
+				if (!state || state.lockedUntil <= now)
+					return maximum;
+
+				return Math.max(
+					maximum,
+					Math.max(1, Math.ceil((state.lockedUntil - now) / 1000))
+				);
+			}, 0);
 
 			return {
-				allowed: false,
-				key,
-				retryAfterSeconds: Math.max(1, Math.ceil((state.lockedUntil - now) / 1000))
+				accountKey,
+				allowed: retryAfterSeconds === 0,
+				keys,
+				retryAfterSeconds,
 			};
 		},
 		clear(key: string) {
 			attempts.delete(key);
 		},
-		recordFailure(key: string) {
+		recordFailure(keys: string[]) {
 			const now = Date.now();
-			const current = attempts.get(key);
 
-			if (!current || now - current.firstAttemptAt > windowMs) {
+			for (const key of keys) {
+				const current = attempts.get(key);
+
+				if (!current || now - current.firstAttemptAt > windowMs) {
+					attempts.set(key, {
+						count: 1,
+						firstAttemptAt: now,
+						lockedUntil: 0
+					});
+					continue;
+				}
+
+				const nextCount = current.count + 1;
 				attempts.set(key, {
-					count: 1,
-					firstAttemptAt: now,
-					lockedUntil: 0
+					count: nextCount,
+					firstAttemptAt: current.firstAttemptAt,
+					lockedUntil: nextCount >= getMaximumAttempts(key) ? now + lockoutMs : 0
 				});
-				return;
 			}
-
-			const nextCount = current.count + 1;
-			attempts.set(key, {
-				count: nextCount,
-				firstAttemptAt: current.firstAttemptAt,
-				lockedUntil: nextCount >= maxAttempts ? now + lockoutMs : 0
-			});
 		}
 	};
 }

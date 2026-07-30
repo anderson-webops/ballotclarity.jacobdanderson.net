@@ -3189,7 +3189,8 @@ test("POST /api/feedback throttles repeated public submissions", async () => {
 		const acceptedResponse = await fetch(`${isolatedBaseUrl}/api/feedback`, {
 			body: JSON.stringify(submissionPayload),
 			headers: {
-				"Content-Type": "application/json"
+				"Content-Type": "application/json",
+				"x-forwarded-for": "203.0.113.40"
 			},
 			method: "POST"
 		});
@@ -3199,7 +3200,8 @@ test("POST /api/feedback throttles repeated public submissions", async () => {
 				message: "Second submission should be throttled."
 			}),
 			headers: {
-				"Content-Type": "application/json"
+				"Content-Type": "application/json",
+				"x-forwarded-for": "198.51.100.99"
 			},
 			method: "POST"
 		});
@@ -3218,6 +3220,62 @@ test("POST /api/feedback throttles repeated public submissions", async () => {
 		assert.ok(Number(throttledResponse.headers.get("retry-after")) > 0);
 		assert.equal(correctionsResponse.status, 200);
 		assert.equal(throttleProbeCorrections.length, 1);
+	}
+	finally {
+		await new Promise<void>((resolve, reject) => {
+			isolatedServer.close(error => error ? reject(error) : resolve());
+		});
+	}
+});
+
+test("POST /api/feedback rejects unsafe or oversized public input", async () => {
+	const isolatedServer = (await createApp({
+		adminApiKey,
+		adminDbPath: ":memory:",
+		contentSeed,
+		correctionSeed: [],
+		sourceMonitorSeed
+	})).listen(0, "127.0.0.1");
+
+	await once(isolatedServer, "listening");
+	const isolatedAddress = isolatedServer.address() as AddressInfo;
+	const isolatedBaseUrl = `http://127.0.0.1:${isolatedAddress.port}`;
+	const baseline = {
+		email: "reader@example.com",
+		message: "Please review this public page.",
+		subject: "Feedback validation probe",
+		submissionType: "correction"
+	};
+
+	try {
+		const invalidPayloads = [
+			{ ...baseline, email: "invalid" },
+			{ ...baseline, pageUrl: "https://attacker.example/impersonated-page" },
+			{ ...baseline, sourceLinks: "javascript:alert(1)" },
+			{ ...baseline, message: "x".repeat(5_001) },
+		];
+
+		for (const payload of invalidPayloads) {
+			const response = await fetch(`${isolatedBaseUrl}/api/feedback`, {
+				body: JSON.stringify(payload),
+				headers: {
+					"Content-Type": "application/json"
+				},
+				method: "POST"
+			});
+
+			assert.equal(response.status, 400);
+		}
+
+		const correctionsResponse = await fetch(`${isolatedBaseUrl}/api/admin/corrections`, {
+			headers: {
+				"x-admin-api-key": adminApiKey
+			}
+		});
+		const correctionsBody = await correctionsResponse.json();
+
+		assert.equal(correctionsResponse.status, 200);
+		assert.equal(correctionsBody.corrections.length, 0);
 	}
 	finally {
 		await new Promise<void>((resolve, reject) => {
@@ -3697,7 +3755,7 @@ test("POST /api/admin/auth/login authenticates a configured user and throttles r
 				}),
 				headers: {
 					"Content-Type": "application/json",
-					"x-forwarded-for": "203.0.113.10"
+					"x-forwarded-for": `203.0.113.${10 + index}`
 				},
 				method: "POST"
 			});
@@ -3712,7 +3770,7 @@ test("POST /api/admin/auth/login authenticates a configured user and throttles r
 			}),
 			headers: {
 				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.10"
+				"x-forwarded-for": "198.51.100.200"
 			},
 			method: "POST"
 		});

@@ -120,6 +120,7 @@ function buildProductionEnv(overrides: Record<string, string | undefined> = {}) 
 		ADMIN_API_KEY: "a".repeat(48),
 		ADMIN_DATABASE_URL: "postgres://ballotclarity:secret@db.internal:5432/ballotclarity",
 		ADMIN_LOGIN_LOCKOUT_MS: "1800000",
+		ADMIN_LOGIN_IP_MAX_ATTEMPTS: "25",
 		ADMIN_LOGIN_MAX_ATTEMPTS: "5",
 		ADMIN_LOGIN_WINDOW_MS: "900000",
 		ADMIN_MFA_ENCRYPTION_KEY: "f".repeat(48),
@@ -139,7 +140,7 @@ function buildProductionEnv(overrides: Record<string, string | undefined> = {}) 
 		PUBLIC_LOOKUP_RATE_LIMIT_MAX: "60",
 		PUBLIC_LOOKUP_RATE_LIMIT_WINDOW_MS: "600000",
 		SOURCE_ASSET_BASE_URL: "https://assets.ballotclarity.org/source-files",
-		TRUST_PROXY: "true",
+		TRUST_PROXY: "loopback",
 		...overrides,
 	};
 }
@@ -275,6 +276,7 @@ test("production config check fails invalid throttle values", () => {
 	const evaluation = evaluateProductionConfig({
 		env: buildProductionEnv({
 			ADMIN_LOGIN_LOCKOUT_MS: "-1000",
+			ADMIN_LOGIN_IP_MAX_ATTEMPTS: "none",
 			ADMIN_LOGIN_MAX_ATTEMPTS: "many",
 			ADMIN_LOGIN_WINDOW_MS: "0",
 			PUBLIC_FEEDBACK_RATE_LIMIT_MAX: "0",
@@ -287,11 +289,28 @@ test("production config check fails invalid throttle values", () => {
 	assert.equal(evaluation.ok, false);
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_lockout_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_max_attempts.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("admin_login_ip_max_attempts.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_window_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_feedback_rate_limit_max.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_feedback_rate_limit_window_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_lookup_rate_limit_max.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_lookup_rate_limit_window_ms.invalid"));
+});
+
+test("production config check rejects missing or overly broad proxy trust", () => {
+	const missing = evaluateProductionConfig({
+		env: buildProductionEnv({ TRUST_PROXY: "false" }),
+	});
+	const broad = evaluateProductionConfig({
+		env: buildProductionEnv({ TRUST_PROXY: "true" }),
+	});
+	const invalid = evaluateProductionConfig({
+		env: buildProductionEnv({ TRUST_PROXY: "not-a-range" }),
+	});
+
+	assert.ok(issueIds(missing, "errors").includes("trust_proxy.missing"));
+	assert.ok(issueIds(broad, "errors").includes("trust_proxy.broad"));
+	assert.ok(issueIds(invalid, "errors").includes("trust_proxy.invalid"));
 });
 
 test("production config check allows valid optional ballot-content provider endpoints", () => {

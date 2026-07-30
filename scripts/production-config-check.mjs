@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import process from "node:process";
 
 const envLinePattern = /^\s*([\w.-]+)\s*=\s*(.*)?\s*$/;
@@ -102,6 +103,60 @@ function isPlaceholderOrInternalHostname(rawHostname) {
 
 function hasTruthyValue(value) {
 	return ["1", "true", "yes", "on"].includes(normalize(value).toLowerCase());
+}
+
+function isValidTrustProxyRange(value) {
+	const namedRanges = new Set(["linklocal", "loopback", "uniquelocal"]);
+
+	if (namedRanges.has(value.toLowerCase()))
+		return true;
+
+	const [address, prefix, ...extra] = value.split("/");
+	const family = isIP(address ?? "");
+
+	if (!family || extra.length)
+		return false;
+
+	if (prefix === undefined)
+		return true;
+
+	const parsedPrefix = Number(prefix);
+	return Number.isInteger(parsedPrefix)
+		&& parsedPrefix >= 0
+		&& parsedPrefix <= (family === 4 ? 32 : 128);
+}
+
+function checkTrustProxy({ errors, value }) {
+	const normalized = normalize(value);
+	const lowered = normalized.toLowerCase();
+
+	if (!normalized || ["0", "false", "no", "off"].includes(lowered)) {
+		errors.push(issue(
+			"error",
+			"trust_proxy.missing",
+			"TRUST_PROXY must list the production reverse proxy IPs, CIDR ranges, or named ranges.",
+		));
+		return;
+	}
+
+	if (["1", "true", "yes", "on"].includes(lowered) || /^\d+$/u.test(normalized)) {
+		errors.push(issue(
+			"error",
+			"trust_proxy.broad",
+			"TRUST_PROXY must not trust every proxy or an unverified hop count; use explicit proxy ranges.",
+		));
+		return;
+	}
+
+	const ranges = normalized.split(",").map(range => range.trim()).filter(Boolean);
+
+	if (!ranges.length || ranges.some(range => !isValidTrustProxyRange(range))) {
+		errors.push(issue(
+			"error",
+			"trust_proxy.invalid",
+			"TRUST_PROXY contains an invalid proxy IP, CIDR range, or named range.",
+		));
+	}
 }
 
 function issue(severity, id, message) {
@@ -731,6 +786,11 @@ export function evaluateProductionConfig({
 	});
 	checkPositiveInteger({
 		errors,
+		key: "ADMIN_LOGIN_IP_MAX_ATTEMPTS",
+		value: env.ADMIN_LOGIN_IP_MAX_ATTEMPTS,
+	});
+	checkPositiveInteger({
+		errors,
 		key: "ADMIN_LOGIN_LOCKOUT_MS",
 		value: env.ADMIN_LOGIN_LOCKOUT_MS,
 	});
@@ -857,13 +917,7 @@ export function evaluateProductionConfig({
 		});
 	}
 
-	if (!hasTruthyValue(env.TRUST_PROXY)) {
-		warnings.push(issue(
-			"warning",
-			"trust_proxy.disabled",
-			"TRUST_PROXY is not true; enable it when Express runs behind a production reverse proxy.",
-		));
-	}
+	checkTrustProxy({ errors, value: env.TRUST_PROXY });
 
 	if (hasTruthyValue(env.BALLOTCLARITY_ZIP_LOOKUP_LOG_ENABLED) && !normalize(env.BALLOTCLARITY_ZIP_LOOKUP_LOG_PATH)) {
 		warnings.push(issue(

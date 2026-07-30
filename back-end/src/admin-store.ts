@@ -1,3 +1,4 @@
+import type { CorrectionSubmissionInput } from "./feedback-submission.js";
 import type {
 	AdminActivityItem,
 	AdminAuditEvent,
@@ -54,6 +55,7 @@ import {
 	demoElection,
 	demoMeasures
 } from "./coverage-data.js";
+import { normalizeCorrectionSubmission } from "./feedback-submission.js";
 
 export interface AdminRepositoryOptions {
 	dbPath?: string | null;
@@ -86,16 +88,6 @@ export interface LegacyDemoAdminIds {
 export interface GuidePackageWorkflowListResponse {
 	packages: GuidePackageWorkflow[];
 	updatedAt: string;
-}
-
-export interface CorrectionSubmissionInput {
-	email: string;
-	message: string;
-	name?: string;
-	pageUrl?: string;
-	sourceLinks?: string;
-	subject: string;
-	submissionType: AdminSubmissionType;
 }
 
 export interface ContentPatch {
@@ -864,6 +856,7 @@ function ensureColumn(database: DatabaseSync, table: string, column: string, def
 export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}): AdminRepository {
 	const resolvedPath = ensureDatabasePath(options.dbPath || process.env.ADMIN_DB_PATH || defaultDbPath);
 	const database = new DatabaseSync(resolvedPath);
+	const dummyPasswordHash = hashPassword(randomUUID());
 	const mfaEncryptionKey = options.mfaEncryptionKey ?? process.env.ADMIN_MFA_ENCRYPTION_KEY ?? "";
 	const schema = readFileSync(resolveSqliteSchemaPath(), "utf8");
 	const contentSeed = options.contentSeed ?? [];
@@ -1461,7 +1454,9 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 			WHERE username = ?
 		`).get(normalized) as UserRow | undefined;
 
-		if (!row || row.disabled_at || !verifyPassword(password, row.password_hash))
+		const passwordAccepted = verifyPassword(password, row?.password_hash ?? dummyPasswordHash);
+
+		if (!row || row.disabled_at || !passwordAccepted)
 			return null;
 
 		const now = new Date().toISOString();
@@ -2318,20 +2313,16 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 	}
 
 	function createCorrectionSubmission(input: CorrectionSubmissionInput) {
-		const subject = input.subject.trim();
-		const message = input.message.trim();
-		const email = input.email.trim();
-
-		if (!subject || !message || !email)
-			throw new Error("Subject, message, and email are required.");
+		const submission = normalizeCorrectionSubmission(input);
+		const { email, message, subject } = submission;
 
 		const now = new Date().toISOString();
 		const id = `correction-${randomUUID()}`;
-		const reportedBy = input.name?.trim() ? `${input.name.trim()} <${email}>` : email;
-		const summary = input.sourceLinks?.trim()
-			? `${message}\n\nSupporting links:\n${input.sourceLinks.trim()}`
+		const reportedBy = submission.name ? `${submission.name} <${email}>` : email;
+		const summary = submission.sourceLinks
+			? `${message}\n\nSupporting links:\n${submission.sourceLinks}`
 			: message;
-		const contentId = resolveContentIdForPageUrl(input.pageUrl);
+		const contentId = resolveContentIdForPageUrl(submission.pageUrl);
 
 		database.prepare(`
 			INSERT INTO admin_corrections (
@@ -2352,26 +2343,26 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(
 			id,
-			input.submissionType,
+			submission.submissionType,
 			subject,
 			"policy",
-			input.pageUrl?.trim() || "General site feedback",
+			submission.pageUrl || "General site feedback",
 			"new",
-			input.submissionType === "correction" ? "high" : "medium",
+			submission.submissionType === "correction" ? "high" : "medium",
 			now,
 			reportedBy,
 			summary,
-			input.submissionType === "correction"
+			submission.submissionType === "correction"
 				? "Verify the cited claim, source trail, and page framing."
 				: "Triage the feedback and determine whether it belongs in product, content, or operations review.",
-			input.sourceLinks?.trim() ? input.sourceLinks.split("\n").filter(Boolean).length : 0,
-			input.pageUrl?.trim() || null,
+			submission.sourceLinks?.split("\n").length ?? 0,
+			submission.pageUrl || null,
 			contentId
 		);
 
 		logActivity(
 			"correction",
-			input.submissionType === "correction" ? "Received correction submission" : "Received public feedback",
+			submission.submissionType === "correction" ? "Received correction submission" : "Received public feedback",
 			`${subject} was submitted through the public contact form.`
 		);
 

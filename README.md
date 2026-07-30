@@ -213,9 +213,9 @@ Server-only variables:
 - `SOURCE_ASSET_BASE_URL`: optional public object-storage or CDN base URL for mirrored source files
 - `LIVE_COVERAGE_FILE`: path to the imported coverage snapshot consumed by the public API
 - `LIVE_COVERAGE_REQUIRED`: when `true`, fail startup if `LIVE_COVERAGE_FILE` is missing
-- `TRUST_PROXY`: set to `true` when Express is behind a reverse proxy so request IP and forwarded headers are trusted
+- `TRUST_PROXY`: explicit trusted reverse-proxy IPs, CIDR ranges, or named ranges; use `loopback` for same-host Nginx and never use broad `true` trust
 - `LOG_LEVEL`: structured backend log level, such as `info`, `warn`, or `error`
-- `ADMIN_LOGIN_WINDOW_MS`, `ADMIN_LOGIN_MAX_ATTEMPTS`, `ADMIN_LOGIN_LOCKOUT_MS`: admin login-throttle controls for the backend auth endpoint; values must be positive integers when set
+- `ADMIN_LOGIN_WINDOW_MS`, `ADMIN_LOGIN_MAX_ATTEMPTS`, `ADMIN_LOGIN_IP_MAX_ATTEMPTS`, `ADMIN_LOGIN_LOCKOUT_MS`: independent account and source-IP login-throttle controls for the backend auth endpoint; values must be positive integers when set
 - `GOOGLE_CIVIC_FORCE_IPV4`: when `true`, Google Civic requests prefer IPv4 egress so IPv4-restricted API keys work on hosts that otherwise default to IPv6
 - `OPENSTATES_FETCH_TIMEOUT_MS`: optional Open States request timeout in milliseconds for scheduled provider syncs
 - `CENSUS_GEOCODER_BENCHMARK`, `CENSUS_GEOCODER_VINTAGE`: optional overrides for reproducible Census geocoder lookups

@@ -92,6 +92,7 @@ import { buildBallotContentProviderSummary, getPublicBallotContentProviderOption
 import { createCensusGeocoderClient } from "./census-geocoder.js";
 import { createCongressClient, isCurrentCongressMemberRecord } from "./congress.js";
 import { createCoverageRepository } from "./coverage-repository.js";
+import { normalizeCorrectionSubmission } from "./feedback-submission.js";
 import { createGoogleCivicClient } from "./google-civic.js";
 import {
 	buildDefaultGuidePackageSeed,
@@ -109,6 +110,7 @@ import { createOpenFecClient } from "./openfec.js";
 import { createOpenStatesClient } from "./openstates.js";
 import { buildCongressProfileImages, uniqueProfileImages } from "./profile-images.js";
 import { buildProviderSummary } from "./provider-config.js";
+import { parseTrustProxySetting } from "./proxy-trust.js";
 import { createPublicRequestThrottle } from "./public-request-throttle.js";
 import { buildCuratedPublicSourceRecords, mapAuthorityToPublisherType } from "./public-source-directory.js";
 import { classifyRepresentative } from "./representative-classification.js";
@@ -149,6 +151,7 @@ interface CreateAppOptions {
 	publicFeedbackThrottle?: PublicRequestThrottle;
 	publicLookupThrottle?: PublicRequestThrottle;
 	sourceMonitorSeed?: AdminSourceMonitorItem[];
+	trustProxy?: string | null;
 	zipLocationService?: ZipLocationService | null;
 	zipLookupLogger?: ZipLookupLogger;
 }
@@ -261,7 +264,6 @@ function createCorsOriginResolver() {
 function buildPublicThrottleKey(request: express.Request) {
 	return request.ip
 		|| request.socket.remoteAddress
-		|| request.header("x-real-ip")
 		|| "unknown";
 }
 
@@ -4260,8 +4262,10 @@ export async function createApp(options: CreateAppOptions = {}) {
 		return readActiveNationwideLookupContext(request.header("cookie"), activeLookupCookieSecret);
 	}
 
-	if (process.env.TRUST_PROXY === "true")
-		app.set("trust proxy", true);
+	const trustProxy = parseTrustProxySetting(options.trustProxy ?? process.env.TRUST_PROXY);
+
+	if (trustProxy)
+		app.set("trust proxy", trustProxy);
 
 	app.use((_request, response, next) => {
 		for (const [header, value] of Object.entries(securityHeaders))
@@ -4345,7 +4349,15 @@ export async function createApp(options: CreateAppOptions = {}) {
 		const username = typeof request.body?.username === "string" ? request.body.username : "";
 		const password = typeof request.body?.password === "string" ? request.body.password : "";
 		const mfaCode = typeof request.body?.mfaCode === "string" ? request.body.mfaCode : "";
-		const throttleState = adminLoginThrottle.check(username, request.header("x-forwarded-for") || request.ip || "");
+		const clientIp = buildPublicThrottleKey(request);
+		const throttleState = adminLoginThrottle.check(username, clientIp);
+
+		if (username.length > 128 || password.length > 1_024 || mfaCode.length > 32) {
+			response.status(400).json({
+				message: "Invalid admin login request."
+			});
+			return;
+		}
 
 		if (!await adminRepository.hasUsers()) {
 			response.status(503).json({
@@ -4356,7 +4368,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 		if (!throttleState.allowed) {
 			logger.warn("admin.login.throttled", {
-				ip: request.header("x-forwarded-for") || request.ip || "",
+				ip: clientIp,
 				requestId: response.locals.requestId,
 				retryAfterSeconds: throttleState.retryAfterSeconds,
 				username
@@ -4372,9 +4384,9 @@ export async function createApp(options: CreateAppOptions = {}) {
 		const user = await adminRepository.authenticateUser(username, password);
 
 		if (!user) {
-			adminLoginThrottle.recordFailure(throttleState.key);
+			adminLoginThrottle.recordFailure(throttleState.keys);
 			logger.warn("admin.login.failed", {
-				ip: request.header("x-forwarded-for") || request.ip || "",
+				ip: clientIp,
 				requestId: response.locals.requestId,
 				username
 			});
@@ -4397,7 +4409,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 		}
 
 		if (user.mfaEnabledAt && !await adminRepository.verifyUserMfaCode(user.id, mfaCode)) {
-			adminLoginThrottle.recordFailure(throttleState.key);
+			adminLoginThrottle.recordFailure(throttleState.keys);
 			logger.warn("admin.login.mfa_failed", {
 				requestId: response.locals.requestId,
 				username: user.username
@@ -4408,7 +4420,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			return;
 		}
 
-		adminLoginThrottle.clear(throttleState.key);
+		adminLoginThrottle.clear(throttleState.accountKey);
 		logger.info("admin.login.succeeded", {
 			requestId: response.locals.requestId,
 			role: user.role,
@@ -4762,15 +4774,9 @@ export async function createApp(options: CreateAppOptions = {}) {
 				return;
 			}
 
-			const result = await adminRepository.createCorrectionSubmission({
-				email: typeof request.body?.email === "string" ? request.body.email : "",
-				message: typeof request.body?.message === "string" ? request.body.message : "",
-				name: typeof request.body?.name === "string" ? request.body.name : undefined,
-				pageUrl: typeof request.body?.pageUrl === "string" ? request.body.pageUrl : undefined,
-				sourceLinks: typeof request.body?.sourceLinks === "string" ? request.body.sourceLinks : undefined,
-				subject: typeof request.body?.subject === "string" ? request.body.subject : "",
-				submissionType: request.body?.submissionType === "correction" ? "correction" : "feedback"
-			});
+			const result = await adminRepository.createCorrectionSubmission(
+				normalizeCorrectionSubmission(request.body ?? {})
+			);
 
 			response.status(201).json(result);
 		}

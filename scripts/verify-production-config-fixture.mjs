@@ -51,6 +51,7 @@ try {
 		ADDRESS_CACHE_ENCRYPTION_KEY: secret(),
 		ADMIN_DATABASE_URL: "postgres://ballotclarity:secret@db.internal:5432/ballotclarity",
 		ADMIN_LOGIN_LOCKOUT_MS: "1800000",
+		ADMIN_LOGIN_IP_MAX_ATTEMPTS: "25",
 		ADMIN_LOGIN_MAX_ATTEMPTS: "5",
 		ADMIN_LOGIN_WINDOW_MS: "900000",
 		ADMIN_MFA_ENCRYPTION_KEY: secret(),
@@ -70,7 +71,7 @@ try {
 		PUBLIC_LOOKUP_RATE_LIMIT_MAX: "60",
 		PUBLIC_LOOKUP_RATE_LIMIT_WINDOW_MS: "600000",
 		SOURCE_ASSET_BASE_URL: "https://assets.ballotclarity.org/source-files",
-		TRUST_PROXY: "true",
+		TRUST_PROXY: "loopback",
 	});
 
 	const result = spawnSync(
