@@ -22,8 +22,11 @@ const redirectTarget = computed(() => {
 
 const { data: session } = await useAdminSession("admin-login-session");
 
-if (session.value?.authenticated)
-	await navigateTo(redirectTarget.value);
+if (session.value?.authenticated) {
+	await navigateTo(session.value.passwordChangeRequiredAt
+		? "/admin/account"
+		: redirectTarget.value);
+}
 
 async function handleSubmit() {
 	errorMessage.value = "";
@@ -46,7 +49,9 @@ async function handleSubmit() {
 			return;
 		}
 
-		await navigateTo(redirectTarget.value);
+		await navigateTo(loginResponse.passwordChangeRequiredAt
+			? "/admin/account"
+			: redirectTarget.value);
 	}
 	catch (error) {
 		if (error instanceof FetchError) {

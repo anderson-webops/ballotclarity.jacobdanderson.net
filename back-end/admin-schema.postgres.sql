@@ -10,11 +10,13 @@ CREATE TABLE IF NOT EXISTS admin_users (
 	disabled_at TEXT,
 	last_login_at TEXT,
 	mfa_secret TEXT,
-	mfa_enabled_at TEXT
+	mfa_enabled_at TEXT,
+	password_change_required_at TEXT
 );
 
 ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS mfa_secret TEXT;
 ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS mfa_enabled_at TEXT;
+ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS password_change_required_at TEXT;
 
 CREATE TABLE IF NOT EXISTS admin_content (
 	id TEXT PRIMARY KEY,

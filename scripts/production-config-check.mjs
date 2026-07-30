@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { validateHeaderName } from "node:http";
 import { isIP } from "node:net";
 import process from "node:process";
 
@@ -103,6 +104,82 @@ function isPlaceholderOrInternalHostname(rawHostname) {
 
 function hasTruthyValue(value) {
 	return ["1", "true", "yes", "on"].includes(normalize(value).toLowerCase());
+}
+
+function readConfiguredHeaderNames(env, pluralKey, singularKey) {
+	return normalize(env[pluralKey] || env[singularKey])
+		.split(",")
+		.map(value => value.trim())
+		.filter(Boolean);
+}
+
+function isValidHeaderName(value) {
+	try {
+		validateHeaderName(value);
+		return true;
+	}
+	catch {
+		return false;
+	}
+}
+
+function checkLocationGuess({ env, errors, warnings }) {
+	const mode = normalize(env.LOCATION_GUESS_MODE).toLowerCase() || "disabled";
+	const supportedModes = new Set(["disabled", "browser_geolocation", "geoip_provider", "proxy_headers"]);
+
+	if (!supportedModes.has(mode)) {
+		errors.push(issue(
+			"error",
+			"location_guess_mode.invalid",
+			"LOCATION_GUESS_MODE must be disabled, browser_geolocation, geoip_provider, or proxy_headers.",
+		));
+		return;
+	}
+
+	if (mode === "browser_geolocation" || mode === "geoip_provider") {
+		warnings.push(issue(
+			"warning",
+			"location_guess_mode.inactive",
+			`${mode} is reserved but does not enable automatic server-side guessing in the current release.`,
+		));
+		return;
+	}
+
+	if (mode !== "proxy_headers")
+		return;
+
+	if (!hasTruthyValue(env.LOCATION_GUESS_PROXY_HEADERS_TRUSTED)) {
+		errors.push(issue(
+			"error",
+			"location_guess_proxy_headers.untrusted",
+			"proxy_headers location guessing requires LOCATION_GUESS_PROXY_HEADERS_TRUSTED=true after the trusted edge is configured to remove and overwrite client-supplied geography headers.",
+		));
+	}
+
+	const headerFields = {
+		city: readConfiguredHeaderNames(env, "LOCATION_GUESS_PROXY_CITY_HEADERS", "LOCATION_GUESS_PROXY_CITY_HEADER"),
+		country: readConfiguredHeaderNames(env, "LOCATION_GUESS_PROXY_COUNTRY_HEADERS", "LOCATION_GUESS_PROXY_COUNTRY_HEADER"),
+		postalCode: readConfiguredHeaderNames(env, "LOCATION_GUESS_PROXY_POSTAL_CODE_HEADERS", "LOCATION_GUESS_PROXY_POSTAL_CODE_HEADER"),
+		region: readConfiguredHeaderNames(env, "LOCATION_GUESS_PROXY_REGION_HEADERS", "LOCATION_GUESS_PROXY_REGION_HEADER"),
+	};
+
+	for (const [field, names] of Object.entries(headerFields)) {
+		if (names.length > 16 || names.some(name => name.length > 128 || !isValidHeaderName(name))) {
+			errors.push(issue(
+				"error",
+				`location_guess_proxy_headers.${field}.invalid`,
+				`Configured ${field} proxy geography headers must contain at most 16 valid HTTP header names of at most 128 characters each.`,
+			));
+		}
+	}
+
+	if (!headerFields.postalCode.length && !(headerFields.city.length && headerFields.region.length)) {
+		errors.push(issue(
+			"error",
+			"location_guess_proxy_headers.incomplete",
+			"proxy_headers location guessing requires a postal-code header or both city and region headers.",
+		));
+	}
 }
 
 function isValidTrustProxyRange(value) {
@@ -222,6 +299,31 @@ function checkSecret({ errors, key, minLength = 32, value }) {
 		errors.push(issue("error", `${key.toLowerCase()}.weak`, `${key} appears to use a placeholder value.`));
 }
 
+function checkDistinctSecrets({ errors, secrets }) {
+	const keysByValue = new Map();
+
+	for (const [key, value] of Object.entries(secrets)) {
+		const normalized = normalize(value);
+
+		if (!normalized)
+			continue;
+
+		const matchingKeys = keysByValue.get(normalized) ?? [];
+		matchingKeys.push(key);
+		keysByValue.set(normalized, matchingKeys);
+	}
+
+	const reusedKeyGroups = Array.from(keysByValue.values()).filter(keys => keys.length > 1);
+
+	if (reusedKeyGroups.length) {
+		errors.push(issue(
+			"error",
+			"secret.reuse",
+			`Production secrets must be independently generated. Reused values were found across: ${reusedKeyGroups.map(keys => keys.join(", ")).join("; ")}.`,
+		));
+	}
+}
+
 function checkContactAddress({ errors, value }) {
 	const raw = normalize(value);
 
@@ -282,7 +384,9 @@ function checkPositiveInteger({ errors, key, value }) {
 	if (!raw)
 		return;
 
-	if (!/^\d+$/u.test(raw) || Number(raw) < 1) {
+	const parsed = Number(raw);
+
+	if (!/^\d+$/u.test(raw) || !Number.isSafeInteger(parsed) || parsed < 1) {
 		errors.push(issue(
 			"error",
 			`${key.toLowerCase()}.invalid`,
@@ -732,6 +836,17 @@ export function evaluateProductionConfig({
 		key: "CONTACT_ADDRESS_SESSION_SECRET",
 		value: env.CONTACT_ADDRESS_SESSION_SECRET || env.NUXT_CONTACT_ADDRESS_SESSION_SECRET,
 	});
+	checkDistinctSecrets({
+		errors,
+		secrets: {
+			ACTIVE_LOOKUP_COOKIE_SECRET: env.ACTIVE_LOOKUP_COOKIE_SECRET,
+			ADDRESS_CACHE_ENCRYPTION_KEY: env.ADDRESS_CACHE_ENCRYPTION_KEY,
+			ADMIN_API_KEY: env.ADMIN_API_KEY,
+			ADMIN_MFA_ENCRYPTION_KEY: env.ADMIN_MFA_ENCRYPTION_KEY,
+			ADMIN_SESSION_SECRET: env.ADMIN_SESSION_SECRET,
+			CONTACT_ADDRESS_SESSION_SECRET: env.CONTACT_ADDRESS_SESSION_SECRET || env.NUXT_CONTACT_ADDRESS_SESSION_SECRET,
+		},
+	});
 	checkContactAddress({
 		errors,
 		value: env.CONTACT_ADDRESS || env.NUXT_CONTACT_ADDRESS,
@@ -756,6 +871,31 @@ export function evaluateProductionConfig({
 	});
 	checkPositiveInteger({
 		errors,
+		key: "NUXT_PUBLIC_API_FETCH_TIMEOUT_MS",
+		value: env.NUXT_PUBLIC_API_FETCH_TIMEOUT_MS,
+	});
+	checkPositiveInteger({
+		errors,
+		key: "ADMIN_API_FETCH_TIMEOUT_MS",
+		value: env.ADMIN_API_FETCH_TIMEOUT_MS,
+	});
+	checkPositiveInteger({
+		errors,
+		key: "CONTACT_ADDRESS_RATE_LIMIT_WINDOW_MS",
+		value: env.CONTACT_ADDRESS_RATE_LIMIT_WINDOW_MS,
+	});
+	checkPositiveInteger({
+		errors,
+		key: "CONTACT_ADDRESS_RATE_LIMIT_MAX",
+		value: env.CONTACT_ADDRESS_RATE_LIMIT_MAX,
+	});
+	checkPositiveInteger({
+		errors,
+		key: "CONTACT_ADDRESS_RATE_LIMIT_MAX_BUCKETS",
+		value: env.CONTACT_ADDRESS_RATE_LIMIT_MAX_BUCKETS,
+	});
+	checkPositiveInteger({
+		errors,
 		key: "PUBLIC_FEEDBACK_RATE_LIMIT_WINDOW_MS",
 		value: env.PUBLIC_FEEDBACK_RATE_LIMIT_WINDOW_MS,
 	});
@@ -766,23 +906,23 @@ export function evaluateProductionConfig({
 	});
 	checkPositiveInteger({
 		errors,
+		key: "PUBLIC_FEEDBACK_RATE_LIMIT_MAX_BUCKETS",
+		value: env.PUBLIC_FEEDBACK_RATE_LIMIT_MAX_BUCKETS,
+	});
+	checkPositiveInteger({
+		errors,
 		key: "PUBLIC_LOOKUP_RATE_LIMIT_WINDOW_MS",
 		value: env.PUBLIC_LOOKUP_RATE_LIMIT_WINDOW_MS,
 	});
 	checkPositiveInteger({
 		errors,
-		key: "LIVE_COVERAGE_FETCH_TIMEOUT_MS",
-		value: env.LIVE_COVERAGE_FETCH_TIMEOUT_MS,
-	});
-	checkPositiveInteger({
-		errors,
-		key: "LIVE_COVERAGE_FETCH_MAX_BYTES",
-		value: env.LIVE_COVERAGE_FETCH_MAX_BYTES,
-	});
-	checkPositiveInteger({
-		errors,
 		key: "PUBLIC_LOOKUP_RATE_LIMIT_MAX",
 		value: env.PUBLIC_LOOKUP_RATE_LIMIT_MAX,
+	});
+	checkPositiveInteger({
+		errors,
+		key: "PUBLIC_LOOKUP_RATE_LIMIT_MAX_BUCKETS",
+		value: env.PUBLIC_LOOKUP_RATE_LIMIT_MAX_BUCKETS,
 	});
 	checkPositiveInteger({
 		errors,
@@ -804,6 +944,35 @@ export function evaluateProductionConfig({
 		key: "ADMIN_LOGIN_LOCKOUT_MS",
 		value: env.ADMIN_LOGIN_LOCKOUT_MS,
 	});
+	checkPositiveInteger({
+		errors,
+		key: "ADMIN_LOGIN_MAX_BUCKETS",
+		value: env.ADMIN_LOGIN_MAX_BUCKETS,
+	});
+	for (const key of [
+		"GOOGLE_CIVIC_FETCH_TIMEOUT_MS",
+		"CONGRESS_FETCH_TIMEOUT_MS",
+		"OPENFEC_FETCH_TIMEOUT_MS",
+		"OPENSTATES_FETCH_TIMEOUT_MS",
+		"LDA_FETCH_TIMEOUT_MS",
+		"CENSUS_GEOCODER_FETCH_TIMEOUT_MS",
+		"ZIP_LOCATION_FETCH_TIMEOUT_MS",
+		"PROVIDER_RESPONSE_MAX_BYTES",
+		"ADDRESS_CACHE_MAX_ROWS",
+		"REPRESENTATIVE_MODULE_CACHE_MAX_ENTRIES",
+		"REPRESENTATIVE_MODULE_CACHE_TTL_MS",
+		"PUBLIC_REPRESENTATIVE_CACHE_MAX_ENTRIES",
+		"PUBLIC_REPRESENTATIVE_CACHE_TTL_MS",
+		"BALLOTCLARITY_ZIP_LOOKUP_LOG_MAX_BYTES",
+		"LIVE_COVERAGE_FETCH_TIMEOUT_MS",
+		"LIVE_COVERAGE_FETCH_MAX_BYTES",
+	]) {
+		checkPositiveInteger({
+			errors,
+			key,
+			value: env[key],
+		});
+	}
 	checkOptionalHttpsUrl({
 		errors,
 		key: "CTCL_BIP_API_URL",
@@ -928,6 +1097,7 @@ export function evaluateProductionConfig({
 	}
 
 	checkTrustProxy({ errors, value: env.TRUST_PROXY });
+	checkLocationGuess({ env, errors, warnings });
 
 	if (hasTruthyValue(env.BALLOTCLARITY_ZIP_LOOKUP_LOG_ENABLED) && !normalize(env.BALLOTCLARITY_ZIP_LOOKUP_LOG_PATH)) {
 		warnings.push(issue(

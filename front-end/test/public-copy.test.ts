@@ -46,21 +46,18 @@ function collectFiles(root: URL, predicate: (entry: string) => boolean) {
 
 	while (pending.length) {
 		const current = pending.pop();
-		if (!current)
-			continue;
+		if (!current) continue;
 
 		for (const entry of readdirSync(current)) {
 			const path = join(current, entry);
 			const stats = statSync(path);
 
 			if (stats.isDirectory()) {
-				if (entry !== "admin")
-					pending.push(path);
+				if (entry !== "admin") pending.push(path);
 				continue;
 			}
 
-			if (predicate(entry))
-				files.push(path);
+			if (predicate(entry)) files.push(path);
 		}
 	}
 
@@ -86,8 +83,7 @@ test("public copy does not expose staged reference-archive candidate names", () 
 		for (const file of collectPublicVueFiles(root)) {
 			const body = readFileSync(file, "utf8");
 			for (const fragment of referenceArchiveFragments) {
-				if (body.includes(fragment))
-					failures.push(`${relative(process.cwd(), file)} contains ${fragment}`);
+				if (body.includes(fragment)) failures.push(`${relative(process.cwd(), file)} contains ${fragment}`);
 			}
 		}
 	}
@@ -100,9 +96,9 @@ test("public source actions only render when a resolved URL is available", () =>
 	const officialResourceList = readPublicSource("components/OfficialResourceList.vue");
 	const sourceDetailPage = readPublicSource("pages/sources/[id].vue");
 
-	assert.match(sourceList, /<a v-if="source\.url"/);
-	assert.match(officialResourceList, /<a v-if="resource\.url"/);
-	assert.match(sourceDetailPage, /<a v-if="data\.source\.url"/);
+	assert.match(sourceList, /<SafeExternalLink\s+v-if="source\.url"/);
+	assert.match(officialResourceList, /<SafeExternalLink\s+v-if="resource\.url"/);
+	assert.match(sourceDetailPage, /<SafeExternalLink\s+v-if="data\.source\.url"/);
 });
 
 test("public source files do not ship staged reference-archive dossier content", () => {
@@ -255,8 +251,7 @@ test("public source copy avoids implementation and archive jargon", () => {
 		for (const file of collectPublicVueFiles(root)) {
 			const body = readFileSync(file, "utf8");
 			for (const phrase of blockedPhrases) {
-				if (phrase.test(body))
-					failures.push(`${relative(process.cwd(), file)} contains ${phrase}`);
+				if (phrase.test(body)) failures.push(`${relative(process.cwd(), file)} contains ${phrase}`);
 			}
 		}
 	}

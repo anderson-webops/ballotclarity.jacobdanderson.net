@@ -10,13 +10,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.0
           cache: npm
@@ -28,7 +31,7 @@ jobs:
           npm -v
 
       - name: Install deps
-        run: npm ci
+        run: npm ci --include=optional
 
       - name: Lint
         run: npm run lint
@@ -36,9 +39,9 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.0
           cache: npm
@@ -49,7 +52,7 @@ jobs:
           npm -v
 
       - name: Install deps
-        run: npm ci
+        run: npm ci --include=optional
 
       - name: Typecheck
         run: npm run typecheck
@@ -58,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
         env:
           POSTGRES_DB: ballot_clarity_test
           POSTGRES_PASSWORD: postgres
@@ -73,9 +76,9 @@ jobs:
     env:
       TEST_ADMIN_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/ballot_clarity_test
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.0
           cache: npm
@@ -87,7 +90,7 @@ jobs:
           npm -v
 
       - name: Install deps
-        run: npm ci
+        run: npm ci --include=optional
 
       - name: Unit tests
         run: npm run test
@@ -95,9 +98,9 @@ jobs:
   security-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.0
           cache: npm
@@ -109,17 +112,23 @@ jobs:
           npm -v
 
       - name: Install deps
-        run: npm ci
+        run: npm ci --include=optional
+
+      - name: Verify standalone backend lockfile
+        run: npm run verify:backend-lockfile
 
       - name: Security audit policy
         run: npm run audit
 
+      - name: Production dependency audit
+        run: npm run audit:production
+
   production-config:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.0
           cache: npm
@@ -131,7 +140,7 @@ jobs:
           npm -v
 
       - name: Install deps
-        run: npm ci
+        run: npm ci --include=optional
 
       - name: Production configuration policy
         run: npm run verify:production:fixture
@@ -139,9 +148,9 @@ jobs:
   test-e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.0
           cache: npm
@@ -153,7 +162,7 @@ jobs:
           npm -v
 
       - name: Install deps
-        run: npm ci
+        run: npm ci --include=optional
 
       - name: End-to-end smoke test
         run: npm run test:e2e
@@ -162,9 +171,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.0
           cache: npm
@@ -175,7 +184,7 @@ jobs:
           npm -v
 
       - name: Install deps
-        run: npm ci
+        run: npm ci --include=optional
 
       - name: Axe accessibility smoke checks
         run: npm run a11y
@@ -183,9 +192,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.18.0
           cache: npm
@@ -196,10 +205,34 @@ jobs:
           npm -v
 
       - name: Install deps
-        run: npm ci
+        run: npm ci --include=optional
 
       - name: Build
         run: npm run build
 
       - name: Analytics bundle verification
         run: npm run verify:analytics
+
+  native-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+
+      - name: Pin npm version
+        run: |
+          npm i -g npm@11.16.0
+          npm -v
+
+      - name: Install ARM64 dependencies
+        run: npm ci --include=optional
+
+      - name: Verify ARM64 native bindings
+        run: npm run verify:native-bindings
+
+      - name: Build on ARM64
+        run: npm run build

@@ -10,6 +10,10 @@ import type {
 	AdminActivityItem,
 	AdminContentItem,
 	AdminCorrectionRequest,
+	AdminCorrectionStatus,
+	AdminPriority,
+	AdminReviewStatus,
+	AdminSourceHealth,
 	AdminSourceMonitorItem,
 	AdminUser,
 	Candidate,
@@ -27,6 +31,8 @@ import type {
 	GuidePackageDiagnosticsResponse,
 	GuidePackageRecord,
 	GuidePackageRecordResponse,
+	GuidePackageReviewRecommendation,
+	GuidePackageStatus,
 	GuidePackageWorkflow,
 	IssueTag,
 	Jurisdiction,
@@ -88,7 +94,9 @@ import { createAddressEnrichmentService } from "./address-enrichment.js";
 import { createAdminLoginThrottle } from "./admin-login-throttle.js";
 import { createAdminRepository } from "./admin-repository.js";
 import { parseAdminSessionToken } from "./admin-session-token.js";
+import { normalizeAdminUsername } from "./admin-store.js";
 import { buildBallotContentProviderSummary, getPublicBallotContentProviderOptions } from "./ballot-content-providers.js";
+import { createBoundedPromiseCache, resolveBoundedCacheInteger } from "./bounded-promise-cache.js";
 import { createCensusGeocoderClient } from "./census-geocoder.js";
 import { createCongressClient, isCurrentCongressMemberRecord } from "./congress.js";
 import { createCoverageRepository } from "./coverage-repository.js";
@@ -122,6 +130,7 @@ import {
 	listSupplementalOfficeholders,
 	mergeRepresentativeMatchesWithSupplementalRecords,
 } from "./supplemental-officeholders.js";
+import { containsControlCharacters } from "./text-validation.js";
 import { createZipLocationService } from "./zip-location.js";
 import { createZipLookupLogger } from "./zip-lookup-logger.js";
 
@@ -129,6 +138,7 @@ interface CreateAppOptions {
 	activeLookupCookieSecret?: string | null;
 	adminApiKey?: string | null;
 	adminDbPath?: string | null;
+	adminLoginThrottle?: ReturnType<typeof createAdminLoginThrottle>;
 	adminMfaEncryptionKey?: string | null;
 	adminSessionSecret?: string | null;
 	addressCacheEncryptionKey?: string | null;
@@ -156,6 +166,8 @@ interface CreateAppOptions {
 	zipLookupLogger?: ZipLookupLogger;
 }
 
+type AdminLoginThrottleState = ReturnType<ReturnType<typeof createAdminLoginThrottle>["check"]>;
+
 function isAuthorizedAdminRequest(requestKey: string | undefined, configuredKey: string | null) {
 	if (!requestKey || !configuredKey)
 		return false;
@@ -182,7 +194,7 @@ function summarizeMatchedDistricts(labels: string[]) {
 const localCorsOriginPattern = /^https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?$/i;
 const exactZipLookupPattern = /^\d{5}$/u;
 const routeSelectionIdPattern = /^\w[\w.:-]{0,255}$/u;
-const contentSecurityPolicyReportOnly = [
+const contentSecurityPolicy = [
 	"base-uri 'none'",
 	"default-src 'none'",
 	"form-action 'none'",
@@ -190,7 +202,7 @@ const contentSecurityPolicyReportOnly = [
 	"object-src 'none'"
 ].join("; ");
 const securityHeaders = {
-	"Content-Security-Policy-Report-Only": contentSecurityPolicyReportOnly,
+	"Content-Security-Policy": contentSecurityPolicy,
 	"Cross-Origin-Opener-Policy": "same-origin",
 	"Cross-Origin-Resource-Policy": "same-origin",
 	"Origin-Agent-Cluster": "?1",
@@ -399,6 +411,19 @@ function requireAdminRole(response: Response) {
 	return false;
 }
 
+function requirePrivilegedAdminRole(response: Response) {
+	if (!requireAdminRole(response))
+		return false;
+
+	if (response.locals.adminMfaVerified === true)
+		return true;
+
+	response.status(403).json({
+		message: "Multi-factor authentication is required for this admin action."
+	});
+	return false;
+}
+
 function requireSelfServiceActor(response: Response, username: string) {
 	const actor = getAdminAuditActor(response);
 
@@ -411,6 +436,126 @@ function requireSelfServiceActor(response: Response, username: string) {
 	return false;
 }
 
+function isAdminCredentialVerificationError(error: unknown) {
+	return error instanceof Error && (
+		error.message === "Current password was not accepted."
+		|| error.message === "The verification code was not accepted."
+	);
+}
+
+function parseOptionalEnum<T extends string>(
+	value: unknown,
+	allowedValues: readonly T[],
+	fieldLabel: string
+): T | undefined {
+	if (value === undefined)
+		return undefined;
+
+	if (typeof value !== "string" || !allowedValues.includes(value as T))
+		throw new Error(`${fieldLabel} is invalid.`);
+
+	return value as T;
+}
+
+function parseOptionalText(
+	value: unknown,
+	fieldLabel: string,
+	maximumLength: number
+): string | undefined;
+function parseOptionalText(
+	value: unknown,
+	fieldLabel: string,
+	maximumLength: number,
+	options: { nullable: true }
+): string | null | undefined;
+function parseOptionalText(
+	value: unknown,
+	fieldLabel: string,
+	maximumLength: number,
+	options: { nullable?: boolean } = {}
+) {
+	if (value === undefined)
+		return undefined;
+
+	if (value === null && options.nullable)
+		return null;
+
+	if (typeof value !== "string")
+		throw new Error(`${fieldLabel} must be text${options.nullable ? " or null" : ""}.`);
+
+	if (value.includes("\0") || value.length > maximumLength)
+		throw new Error(`${fieldLabel} must be ${maximumLength.toLocaleString("en-US")} characters or fewer and contain no invalid control characters.`);
+
+	return value;
+}
+
+function parseOptionalBoolean(value: unknown, fieldLabel: string) {
+	if (value === undefined)
+		return undefined;
+
+	if (typeof value !== "boolean")
+		throw new Error(`${fieldLabel} must be true or false.`);
+
+	return value;
+}
+
+function parseOptionalTimestamp(value: unknown, fieldLabel: string) {
+	const parsed = parseOptionalText(value, fieldLabel, 64);
+
+	if (parsed !== undefined && !Number.isFinite(Date.parse(parsed)))
+		throw new Error(`${fieldLabel} must be a valid timestamp.`);
+
+	return parsed;
+}
+
+function parseAdminUsername(value: unknown) {
+	const username = parseOptionalText(value, "Admin username", 64)?.trim().toLowerCase() ?? "";
+
+	return normalizeAdminUsername(username);
+}
+
+function parseAdminPassword(value: unknown, fieldLabel: string) {
+	const password = parseOptionalText(value, fieldLabel, 256) ?? "";
+
+	if (!password)
+		throw new Error(`${fieldLabel} is required.`);
+
+	return password;
+}
+
+function parseAdminMfaCode(value: unknown, options: { required?: boolean } = {}) {
+	if ((value === undefined || value === "") && !options.required)
+		return "";
+
+	const code = (parseOptionalText(value, "Admin verification code", 32) ?? "").replace(/\s+/gu, "");
+
+	if (!/^\d{6}$/u.test(code))
+		throw new Error("Admin verification code must contain exactly six digits.");
+
+	return code;
+}
+
+function parseAdminMfaSecret(value: unknown) {
+	const secret = parseOptionalText(value, "Admin MFA secret", 64)?.trim().toUpperCase() ?? "";
+
+	if (!/^[A-Z2-7]{32}$/u.test(secret))
+		throw new Error("Admin MFA secret is invalid.");
+
+	return secret;
+}
+
+const adminPriorities = ["high", "medium", "low"] as const satisfies readonly AdminPriority[];
+const adminReviewStatuses = ["draft", "in-review", "needs-sources", "ready-to-publish", "published"] as const satisfies readonly AdminReviewStatus[];
+const adminCorrectionStatuses = ["new", "researching", "resolved", "triaged"] as const satisfies readonly AdminCorrectionStatus[];
+const adminSourceHealthValues = ["healthy", "incident", "review-soon", "stale"] as const satisfies readonly AdminSourceHealth[];
+const guidePackageStatuses = ["draft", "in_review", "ready_to_publish", "published"] as const satisfies readonly GuidePackageStatus[];
+const guidePackageReviewRecommendations = [
+	"publish",
+	"publish_with_warnings",
+	"needs_revision",
+	"do_not_publish"
+] as const satisfies readonly GuidePackageReviewRecommendation[];
+
 function buildAdminSessionResponse(user: AdminUser) {
 	return {
 		authenticated: true,
@@ -418,6 +563,7 @@ function buildAdminSessionResponse(user: AdminUser) {
 		credentialsUpdatedAt: user.credentialsUpdatedAt,
 		displayName: user.displayName,
 		mfaEnabledAt: user.mfaEnabledAt,
+		passwordChangeRequiredAt: user.passwordChangeRequiredAt,
 		role: user.role,
 		username: user.username
 	};
@@ -2804,14 +2950,18 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 	const logger = createLogger("ballot-clarity-api");
 	const publicFeedbackThrottle = options.publicFeedbackThrottle ?? createPublicRequestThrottle({
+		fallbackMaxBuckets: 10_000,
 		fallbackMaxRequests: 5,
 		fallbackWindowMs: 10 * 60 * 1000,
+		maxBucketsEnvName: "PUBLIC_FEEDBACK_RATE_LIMIT_MAX_BUCKETS",
 		maxRequestsEnvName: "PUBLIC_FEEDBACK_RATE_LIMIT_MAX",
 		windowMsEnvName: "PUBLIC_FEEDBACK_RATE_LIMIT_WINDOW_MS"
 	});
 	const publicLookupThrottle = options.publicLookupThrottle ?? createPublicRequestThrottle({
+		fallbackMaxBuckets: 10_000,
 		fallbackMaxRequests: 60,
 		fallbackWindowMs: 10 * 60 * 1000,
+		maxBucketsEnvName: "PUBLIC_LOOKUP_RATE_LIMIT_MAX_BUCKETS",
 		maxRequestsEnvName: "PUBLIC_LOOKUP_RATE_LIMIT_MAX",
 		windowMsEnvName: "PUBLIC_LOOKUP_RATE_LIMIT_WINDOW_MS"
 	});
@@ -2824,7 +2974,50 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 	const sourceAssetStore = createSourceAssetStore();
 	const locationGuessService = createLocationGuessService(options.locationGuessOptions);
-	const adminLoginThrottle = createAdminLoginThrottle();
+	const adminLoginThrottle = options.adminLoginThrottle ?? createAdminLoginThrottle();
+	function checkAdminVerificationAttempt(
+		request: Request,
+		response: Response,
+		username: string,
+		workflow: "mfa_disable" | "mfa_enable" | "password_change"
+	): AdminLoginThrottleState | null {
+		const clientIp = buildPublicThrottleKey(request);
+		const throttleState = adminLoginThrottle.check(username, clientIp);
+
+		if (throttleState.allowed)
+			return throttleState;
+
+		logger.warn("admin.verification.throttled", {
+			capacityLimited: throttleState.capacityLimited,
+			ip: clientIp,
+			requestId: response.locals.requestId,
+			retryAfterSeconds: throttleState.retryAfterSeconds,
+			username,
+			workflow
+		});
+		response.setHeader("Retry-After", String(throttleState.retryAfterSeconds));
+		response.status(429).json({
+			message: "Too many failed admin verification attempts. Try again later.",
+			retryAfterSeconds: throttleState.retryAfterSeconds
+		});
+		return null;
+	}
+
+	function recordAdminVerificationFailure(
+		request: Request,
+		response: Response,
+		username: string,
+		workflow: "mfa_disable" | "mfa_enable" | "password_change",
+		throttleState: AdminLoginThrottleState
+	) {
+		adminLoginThrottle.recordFailure(throttleState.keys);
+		logger.warn("admin.verification.failed", {
+			ip: buildPublicThrottleKey(request),
+			requestId: response.locals.requestId,
+			username,
+			workflow
+		});
+	}
 	const googleCivicClient = options.googleCivicClient === undefined ? createGoogleCivicClient() : options.googleCivicClient;
 	const ldaClient = options.ldaClient === undefined ? createLdaClient() : options.ldaClient;
 	const congressClient = options.congressClient === undefined ? createCongressClient() : options.congressClient;
@@ -3380,7 +3573,16 @@ export async function createApp(options: CreateAppOptions = {}) {
 		};
 	}
 
-	const publicFederalRepresentativeCache = new Map<string, Promise<PersonProfileResponse | null>>();
+	const publicFederalRepresentativeCache = createBoundedPromiseCache<string, PersonProfileResponse | null>({
+		maxEntries: resolveBoundedCacheInteger(
+			process.env.PUBLIC_REPRESENTATIVE_CACHE_MAX_ENTRIES,
+			1_000,
+		),
+		ttlMs: resolveBoundedCacheInteger(
+			process.env.PUBLIC_REPRESENTATIVE_CACHE_TTL_MS,
+			15 * 60 * 1000,
+		),
+	});
 
 	async function getPublicFederalRepresentative(slug: string) {
 		const normalizedSlug = toLookupSlug(slug);
@@ -3388,12 +3590,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 		if (!normalizedSlug || !congressClient)
 			return null;
 
-		const cached = publicFederalRepresentativeCache.get(normalizedSlug);
-
-		if (cached)
-			return await cached;
-
-		const pending = (async () => {
+		return await publicFederalRepresentativeCache.getOrCreate(normalizedSlug, async () => {
 			const searchName = buildSearchNameFromRepresentativeSlug(normalizedSlug);
 
 			if (!searchName)
@@ -3420,13 +3617,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			const baseProfile = buildRepresentativeProfileFromCongressMember(detail, normalizedSlug);
 			const lookupContext = buildRepresentativeLookupContextFromCongressMember(detail, baseProfile.person.slug, baseProfile.updatedAt);
 			return await representativeModuleResolver.enrichNationwidePersonProfile(lookupContext, baseProfile);
-		})().catch((error) => {
-			publicFederalRepresentativeCache.delete(normalizedSlug);
-			throw error;
 		});
-
-		publicFederalRepresentativeCache.set(normalizedSlug, pending);
-		return await pending;
 	}
 
 	async function listPublicRepresentatives(areaSlug: string | null = null) {
@@ -3542,19 +3733,31 @@ export async function createApp(options: CreateAppOptions = {}) {
 		};
 	}
 
-	function parseStringArray(value: unknown) {
-		return Array.isArray(value)
-			? value.map(item => String(item ?? "").trim()).filter(Boolean)
-			: undefined;
+	function parseStringArray(value: unknown, fieldLabel: string) {
+		if (value === undefined)
+			return undefined;
+
+		if (!Array.isArray(value) || value.length > 50 || value.some(item => typeof item !== "string"))
+			throw new Error(`${fieldLabel} must be an array of at most 50 text entries.`);
+
+		const normalized = value.map(item => item.trim()).filter(Boolean);
+
+		if (
+			normalized.some(item => item.includes("\0") || item.length > 1_000)
+			|| normalized.join("").length > 10_000
+		) {
+			throw new Error(`${fieldLabel} entries are too long.`);
+		}
+
+		return normalized;
 	}
 
 	function parseGuidePackageReviewRecommendation(value: unknown) {
-		return value === "publish"
-			|| value === "publish_with_warnings"
-			|| value === "needs_revision"
-			|| value === "do_not_publish"
-			? value
-			: undefined;
+		return parseOptionalEnum(
+			value,
+			guidePackageReviewRecommendations,
+			"Guide package review recommendation"
+		);
 	}
 
 	function isPublishReadyRecommendation(value: unknown) {
@@ -3868,6 +4071,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 	}
 
 	function buildPublicCorrectionsResponse(corrections: Awaited<ReturnType<typeof adminRepository.listCorrections>>["corrections"]): PublicCorrectionsResponse {
+		const publicCorrections = corrections.filter(item => item.status !== "new");
 		const pageLookup = new Map<string, string>();
 
 		for (const candidate of coverageRepository.data.candidates)
@@ -3882,7 +4086,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 		pageLookup.set("policy:Neutrality policy", "/neutrality");
 
 		return {
-			corrections: corrections.map(item => ({
+			corrections: publicCorrections.map(item => ({
 				entityLabel: item.entityLabel,
 				entityType: item.entityType,
 				id: item.id,
@@ -3895,7 +4099,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 				submittedAt: item.submittedAt,
 				summary: item.summary
 			})),
-			updatedAt: corrections
+			updatedAt: publicCorrections
 				.map(item => item.submittedAt)
 				.sort((left, right) => right.localeCompare(left))[0] ?? coverageRepository.data.updatedAt
 		};
@@ -4259,7 +4463,30 @@ export async function createApp(options: CreateAppOptions = {}) {
 			return activeLookupContext;
 		}
 
-		return readActiveNationwideLookupContext(request.header("cookie"), activeLookupCookieSecret);
+		const activeLookupContext = readActiveNationwideLookupContext(
+			request.header("cookie"),
+			activeLookupCookieSecret
+		);
+
+		if (!activeLookupContext)
+			return null;
+
+		const throttleState = publicLookupThrottle.attempt(buildPublicThrottleKey(request));
+
+		if (!throttleState.allowed) {
+			logger.warn("location.saved_lookup.throttled", {
+				requestId: response.locals.requestId,
+				retryAfterSeconds: throttleState.retryAfterSeconds
+			});
+			response.setHeader("Retry-After", String(throttleState.retryAfterSeconds));
+			response.status(429).json({
+				message: "Too many civic lookup requests from this connection. Try again later.",
+				retryAfterSeconds: throttleState.retryAfterSeconds
+			});
+			return null;
+		}
+
+		return activeLookupContext;
 	}
 
 	const trustProxy = parseTrustProxySetting(options.trustProxy ?? process.env.TRUST_PROXY);
@@ -4279,7 +4506,10 @@ export async function createApp(options: CreateAppOptions = {}) {
 		origin: createCorsOriginResolver()
 	}));
 
-	app.use(express.json());
+	app.use(express.json({
+		limit: "64kb",
+		strict: true
+	}));
 	app.use(createRequestLoggingMiddleware(logger));
 	const snapshotProvenance = buildCoverageSnapshotProvenance(coverageRepository);
 	logger.info("coverage.loaded", {
@@ -4308,6 +4538,11 @@ export async function createApp(options: CreateAppOptions = {}) {
 		});
 	}
 
+	app.use("/api/admin", (_request, response, next) => {
+		response.setHeader("Cache-Control", "no-store, private");
+		next();
+	});
+
 	app.get("/health", async (_request, response) => {
 		try {
 			await adminRepository.getHealth();
@@ -4329,12 +4564,15 @@ export async function createApp(options: CreateAppOptions = {}) {
 			});
 		}
 		catch (error) {
+			logger.error("health.dependency_failed", {
+				error: error instanceof Error ? error.message : "Admin repository health check failed."
+			});
 			response.status(503).json({
 				assetMode: sourceAssetStore.mode,
 				coverageMode: coverageRepository.mode,
 				coverageUpdatedAt: coverageRepository.data.updatedAt,
 				driver: adminRepository.driver,
-				message: error instanceof Error ? error.message : "Admin repository health check failed.",
+				message: "Dependency health check failed.",
 				ok: false,
 				ballotContentProviderSummary: buildBallotContentProviderSummary(),
 				providerSummary: buildProviderSummary(),
@@ -4346,18 +4584,38 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.post("/api/admin/auth/login", async (request, response) => {
-		const username = typeof request.body?.username === "string" ? request.body.username : "";
-		const password = typeof request.body?.password === "string" ? request.body.password : "";
-		const mfaCode = typeof request.body?.mfaCode === "string" ? request.body.mfaCode : "";
-		const clientIp = buildPublicThrottleKey(request);
-		const throttleState = adminLoginThrottle.check(username, clientIp);
+		if (!adminApiKey) {
+			response.status(503).json({
+				message: "Admin API is not configured on this server."
+			});
+			return;
+		}
 
-		if (username.length > 128 || password.length > 1_024 || mfaCode.length > 32) {
+		if (!isAuthorizedAdminRequest(request.header("x-admin-api-key"), adminApiKey)) {
+			response.status(401).json({
+				message: "Unauthorized admin request."
+			});
+			return;
+		}
+
+		let username: string;
+		let password: string;
+		let mfaCode: string;
+
+		try {
+			username = parseAdminUsername(request.body?.username);
+			password = parseAdminPassword(request.body?.password, "Admin password");
+			mfaCode = parseAdminMfaCode(request.body?.mfaCode);
+		}
+		catch {
 			response.status(400).json({
 				message: "Invalid admin login request."
 			});
 			return;
 		}
+
+		const clientIp = buildPublicThrottleKey(request);
+		const throttleState = adminLoginThrottle.check(username, clientIp);
 
 		if (!await adminRepository.hasUsers()) {
 			response.status(503).json({
@@ -4451,14 +4709,22 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.get("/api/admin/auth/session/:username", async (request, response) => {
-		const username = request.params.username.trim().toLowerCase();
-		const credentialsUpdatedAt = typeof request.query.credentialsUpdatedAt === "string"
-			? request.query.credentialsUpdatedAt
-			: "";
+		let username: string;
+		let credentialsUpdatedAt: string;
 
-		if (!username) {
+		try {
+			username = parseAdminUsername(request.params.username);
+			credentialsUpdatedAt = parseOptionalTimestamp(
+				request.query.credentialsUpdatedAt,
+				"Admin credential timestamp"
+			) ?? "";
+
+			if (!credentialsUpdatedAt)
+				throw new Error("Admin credential timestamp is required.");
+		}
+		catch (error) {
 			response.status(400).json({
-				message: "Admin username is required."
+				message: error instanceof Error ? error.message : "Invalid admin session validation request."
 			});
 			return;
 		}
@@ -4483,6 +4749,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 			credentialsUpdatedAt: user.credentialsUpdatedAt,
 			displayName: user.displayName,
 			mfaEnabledAt: user.mfaEnabledAt,
+			passwordChangeRequiredAt: user.passwordChangeRequiredAt,
 			role: user.role,
 			username: user.username
 		});
@@ -4502,6 +4769,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 				role: "admin",
 				username: "development-api-key"
 			} satisfies AdminAuditActor;
+			response.locals.adminMfaVerified = true;
 			next();
 			return;
 		}
@@ -4523,6 +4791,8 @@ export async function createApp(options: CreateAppOptions = {}) {
 			|| user.disabledAt
 			|| user.credentialsUpdatedAt !== token.credentialsUpdatedAt
 			|| user.displayName !== token.displayName
+			|| user.mfaEnabledAt !== token.mfaEnabledAt
+			|| user.passwordChangeRequiredAt !== token.passwordChangeRequiredAt
 			|| user.role !== token.role
 		) {
 			response.status(401).json({
@@ -4536,17 +4806,35 @@ export async function createApp(options: CreateAppOptions = {}) {
 			role: user.role,
 			username: user.username
 		} satisfies AdminAuditActor;
+		response.locals.adminMfaVerified = Boolean(user.mfaEnabledAt);
+
+		if (
+			user.passwordChangeRequiredAt
+			&& request.method !== "GET"
+			&& !(request.method === "POST" && request.path === "/auth/password")
+		) {
+			response.status(403).json({
+				message: "Password change required before performing other admin actions."
+			});
+			return;
+		}
+
 		next();
 	});
 
 	app.post("/api/admin/auth/password", async (request, response) => {
-		const username = typeof request.body?.username === "string" ? request.body.username.trim().toLowerCase() : "";
-		const currentPassword = typeof request.body?.currentPassword === "string" ? request.body.currentPassword : "";
-		const newPassword = typeof request.body?.newPassword === "string" ? request.body.newPassword : "";
+		let username: string;
+		let currentPassword: string;
+		let newPassword: string;
 
-		if (!username || !currentPassword || !newPassword) {
+		try {
+			username = parseAdminUsername(request.body?.username);
+			currentPassword = parseAdminPassword(request.body?.currentPassword, "Current password");
+			newPassword = parseAdminPassword(request.body?.newPassword, "New password");
+		}
+		catch (error) {
 			response.status(400).json({
-				message: "Username, current password, and new password are required."
+				message: error instanceof Error ? error.message : "Invalid admin password request."
 			});
 			return;
 		}
@@ -4554,9 +4842,15 @@ export async function createApp(options: CreateAppOptions = {}) {
 		if (!requireSelfServiceActor(response, username))
 			return;
 
+		const throttleState = checkAdminVerificationAttempt(request, response, username, "password_change");
+
+		if (!throttleState)
+			return;
+
 		const user = await adminRepository.authenticateUser(username, currentPassword);
 
 		if (!user) {
+			recordAdminVerificationFailure(request, response, username, "password_change", throttleState);
 			response.status(401).json({
 				message: "Current password was not accepted."
 			});
@@ -4582,6 +4876,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 				return;
 			}
 
+			adminLoginThrottle.clear(throttleState.accountKey);
 			response.json(buildAdminSessionResponse(updatedUser));
 		}
 		catch (error) {
@@ -4593,7 +4888,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 	app.post("/api/admin/auth/mfa/setup", async (request, response) => {
 		try {
-			const username = typeof request.body?.username === "string" ? request.body.username.trim().toLowerCase() : "";
+			const username = parseAdminUsername(request.body?.username);
 
 			if (!requireSelfServiceActor(response, username))
 				return;
@@ -4608,20 +4903,42 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.post("/api/admin/auth/mfa/enable", async (request, response) => {
+		let username: string;
+		let currentPassword: string;
+		let secret: string;
+		let mfaCode: string;
+
 		try {
-			const username = typeof request.body?.username === "string" ? request.body.username.trim().toLowerCase() : "";
-			const currentPassword = typeof request.body?.currentPassword === "string" ? request.body.currentPassword : "";
-			const secret = typeof request.body?.secret === "string" ? request.body.secret : "";
-			const mfaCode = typeof request.body?.mfaCode === "string" ? request.body.mfaCode : "";
+			username = parseAdminUsername(request.body?.username);
+			currentPassword = parseAdminPassword(request.body?.currentPassword, "Current password");
+			secret = parseAdminMfaSecret(request.body?.secret);
+			mfaCode = parseAdminMfaCode(request.body?.mfaCode, { required: true });
+		}
+		catch (error) {
+			response.status(400).json({
+				message: error instanceof Error ? error.message : "Unable to enable admin MFA."
+			});
+			return;
+		}
 
-			if (!requireSelfServiceActor(response, username))
-				return;
+		if (!requireSelfServiceActor(response, username))
+			return;
 
+		const throttleState = checkAdminVerificationAttempt(request, response, username, "mfa_enable");
+
+		if (!throttleState)
+			return;
+
+		try {
 			const user = await adminRepository.enableMfa(username, currentPassword, secret, mfaCode, getAdminAuditActor(response));
 
+			adminLoginThrottle.clear(throttleState.accountKey);
 			response.json(buildAdminSessionResponse(user));
 		}
 		catch (error) {
+			if (isAdminCredentialVerificationError(error))
+				recordAdminVerificationFailure(request, response, username, "mfa_enable", throttleState);
+
 			response.status(400).json({
 				message: error instanceof Error ? error.message : "Unable to enable admin MFA."
 			});
@@ -4629,19 +4946,40 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.post("/api/admin/auth/mfa/disable", async (request, response) => {
+		let username: string;
+		let currentPassword: string;
+		let mfaCode: string;
+
 		try {
-			const username = typeof request.body?.username === "string" ? request.body.username.trim().toLowerCase() : "";
-			const currentPassword = typeof request.body?.currentPassword === "string" ? request.body.currentPassword : "";
-			const mfaCode = typeof request.body?.mfaCode === "string" ? request.body.mfaCode : "";
+			username = parseAdminUsername(request.body?.username);
+			currentPassword = parseAdminPassword(request.body?.currentPassword, "Current password");
+			mfaCode = parseAdminMfaCode(request.body?.mfaCode, { required: true });
+		}
+		catch (error) {
+			response.status(400).json({
+				message: error instanceof Error ? error.message : "Unable to disable admin MFA."
+			});
+			return;
+		}
 
-			if (!requireSelfServiceActor(response, username))
-				return;
+		if (!requireSelfServiceActor(response, username))
+			return;
 
+		const throttleState = checkAdminVerificationAttempt(request, response, username, "mfa_disable");
+
+		if (!throttleState)
+			return;
+
+		try {
 			const user = await adminRepository.disableMfa(username, currentPassword, mfaCode, getAdminAuditActor(response));
 
+			adminLoginThrottle.clear(throttleState.accountKey);
 			response.json(buildAdminSessionResponse(user));
 		}
 		catch (error) {
+			if (isAdminCredentialVerificationError(error))
+				recordAdminVerificationFailure(request, response, username, "mfa_disable", throttleState);
+
 			response.status(400).json({
 				message: error instanceof Error ? error.message : "Unable to disable admin MFA."
 			});
@@ -4714,6 +5052,13 @@ export async function createApp(options: CreateAppOptions = {}) {
 				message: locationGuessService.publicConfig.canGuessOnLoad
 					? "Automatic location guessing is not available for this request."
 					: "Automatic location guessing is not configured for this host."
+			});
+			return;
+		}
+
+		if (validateLookupInput(guess.rawQuery)) {
+			response.status(404).json({
+				message: "Automatic location guessing is not available for this request."
 			});
 			return;
 		}
@@ -4837,6 +5182,14 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 	app.get("/api/search", async (request, response) => {
 		const query = typeof request.query.q === "string" ? request.query.q : "";
+
+		if (query.length > 200 || containsControlCharacters(query)) {
+			response.status(400).json({
+				message: "Search query must be a single line with 200 characters or fewer."
+			});
+			return;
+		}
+
 		const primaryElectionSlug = getPrimaryElectionSlug();
 		const election = primaryElectionSlug ? await getPublicElection(primaryElectionSlug) : null;
 		const candidates = await listPublicCandidates();
@@ -5005,6 +5358,23 @@ export async function createApp(options: CreateAppOptions = {}) {
 			}
 		}
 
+		if (!activeNationwideLookup) {
+			const throttleState = publicLookupThrottle.attempt(buildPublicThrottleKey(request));
+
+			if (!throttleState.allowed) {
+				logger.warn("representative.direct_lookup.throttled", {
+					requestId: response.locals.requestId,
+					retryAfterSeconds: throttleState.retryAfterSeconds,
+				});
+				response.setHeader("Retry-After", String(throttleState.retryAfterSeconds));
+				response.status(429).json({
+					message: "Too many representative lookup requests from this connection. Try again later.",
+					retryAfterSeconds: throttleState.retryAfterSeconds,
+				});
+				return;
+			}
+		}
+
 		const representative = await getPublicRepresentative(request.params.slug);
 
 		if (!representative) {
@@ -5169,13 +5539,28 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 	app.patch("/api/admin/corrections/:id", async (request, response) => {
 		try {
+			const actor = getAdminAuditActor(response);
+			const current = (await adminRepository.listCorrections()).corrections.find(item => item.id === request.params.id);
+			const requestedStatus = parseOptionalEnum(request.body?.status, adminCorrectionStatuses, "Correction status");
+			const publicCorrectionMutationRequested = Boolean(current && current.status !== "new")
+				|| (requestedStatus !== undefined && requestedStatus !== "new");
+
+			if (actor?.role !== "admin" && publicCorrectionMutationRequested) {
+				response.status(403).json({
+					message: "Admin role required to publish, update, or remove a public correction."
+				});
+				return;
+			}
+
+			if (actor?.role === "admin" && publicCorrectionMutationRequested && !requirePrivilegedAdminRole(response))
+				return;
+
 			response.json(await adminRepository.updateCorrection(request.params.id, {
-				contentId: typeof request.body?.contentId === "string"
-					? request.body.contentId
-					: request.body?.contentId === null ? null : undefined,
-				nextStep: typeof request.body?.nextStep === "string" ? request.body.nextStep : undefined,
-				priority: request.body?.priority,
-				status: request.body?.status
+				auditActor: actor,
+				contentId: parseOptionalText(request.body?.contentId, "Linked content id", 256, { nullable: true }),
+				nextStep: parseOptionalText(request.body?.nextStep, "Correction next step", 2_000),
+				priority: parseOptionalEnum(request.body?.priority, adminPriorities, "Correction priority"),
+				status: requestedStatus
 			}));
 		}
 		catch (error) {
@@ -5205,8 +5590,11 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.post("/api/admin/content/:id/rollback", async (request, response) => {
+		if (!requirePrivilegedAdminRole(response))
+			return;
+
 		try {
-			const historyId = typeof request.body?.historyId === "string" ? request.body.historyId : "";
+			const historyId = parseOptionalText(request.body?.historyId, "Content history id", 256)?.trim() ?? "";
 
 			if (!historyId) {
 				response.status(400).json({
@@ -5226,33 +5614,53 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 	app.patch("/api/admin/content/:id", async (request, response) => {
 		try {
+			const actor = getAdminAuditActor(response);
+			const current = (await adminRepository.listContent()).items.find(item => item.id === request.params.id);
+			const publicationControlRequested = request.body?.published !== undefined
+				|| request.body?.status === "published"
+				|| request.body?.publishApprovedBy !== undefined
+				|| request.body?.publishApprovalNote !== undefined;
+			const liveContentMutationRequested = Boolean(current?.published)
+				|| request.body?.published === true
+				|| request.body?.status === "published";
+
+			if (actor?.role !== "admin" && publicationControlRequested) {
+				response.status(403).json({
+					message: "Admin role required to publish, unpublish, or approve content."
+				});
+				return;
+			}
+
+			if (request.body?.publishApprovedBy !== undefined) {
+				response.status(400).json({
+					message: "Publish reviewer identity is recorded from the authenticated admin session."
+				});
+				return;
+			}
+
+			if (actor?.role === "admin" && liveContentMutationRequested && !requirePrivilegedAdminRole(response))
+				return;
+
+			if (actor?.role !== "admin") {
+				if (current?.published) {
+					response.status(403).json({
+						message: "Admin role required to change live content. Unpublish it before editorial revision."
+					});
+					return;
+				}
+			}
+
 			response.json(await adminRepository.updateContent(request.params.id, {
 				auditActor: getAdminAuditActor(response),
-				assignedTo: typeof request.body?.assignedTo === "string" ? request.body.assignedTo : undefined,
-				blocker: request.body?.blocker === null
-					? null
-					: typeof request.body?.blocker === "string"
-						? request.body.blocker
-						: undefined,
-				priority: request.body?.priority,
-				publishApprovedBy: request.body?.publishApprovedBy === null
-					? null
-					: typeof request.body?.publishApprovedBy === "string"
-						? request.body.publishApprovedBy
-						: undefined,
-				publishApprovalNote: request.body?.publishApprovalNote === null
-					? null
-					: typeof request.body?.publishApprovalNote === "string"
-						? request.body.publishApprovalNote
-						: undefined,
-				publicBallotSummary: request.body?.publicBallotSummary === null
-					? null
-					: typeof request.body?.publicBallotSummary === "string"
-						? request.body.publicBallotSummary
-						: undefined,
-				publicSummary: typeof request.body?.publicSummary === "string" ? request.body.publicSummary : undefined,
-				published: typeof request.body?.published === "boolean" ? request.body.published : undefined,
-				status: request.body?.status
+				assignedTo: parseOptionalText(request.body?.assignedTo, "Content assignee", 200),
+				blocker: parseOptionalText(request.body?.blocker, "Content blocker", 2_000, { nullable: true }),
+				priority: parseOptionalEnum(request.body?.priority, adminPriorities, "Content priority"),
+				publishApprovedBy: liveContentMutationRequested ? actor?.displayName : undefined,
+				publishApprovalNote: parseOptionalText(request.body?.publishApprovalNote, "Publish approval note", 4_000, { nullable: true }),
+				publicBallotSummary: parseOptionalText(request.body?.publicBallotSummary, "Public ballot summary", 10_000, { nullable: true }),
+				publicSummary: parseOptionalText(request.body?.publicSummary, "Public summary", 20_000),
+				published: parseOptionalBoolean(request.body?.published, "Published"),
+				status: parseOptionalEnum(request.body?.status, adminReviewStatuses, "Content status")
 			}));
 		}
 		catch (error) {
@@ -5273,8 +5681,8 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 	app.post("/api/admin/packages", async (request, response) => {
 		try {
-			const electionSlug = typeof request.body?.electionSlug === "string" ? request.body.electionSlug.trim() : "";
-			const jurisdictionSlug = typeof request.body?.jurisdictionSlug === "string" ? request.body.jurisdictionSlug.trim() : undefined;
+			const electionSlug = parseOptionalText(request.body?.electionSlug, "Election slug", 200)?.trim() ?? "";
+			const jurisdictionSlug = parseOptionalText(request.body?.jurisdictionSlug, "Jurisdiction slug", 200)?.trim();
 
 			if (!electionSlug) {
 				response.status(400).json({
@@ -5322,6 +5730,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 	app.patch("/api/admin/packages/:id", async (request, response) => {
 		try {
 			const currentPackage = await getGuidePackageRecord(request.params.id);
+			const actor = getAdminAuditActor(response);
 
 			if (!currentPackage) {
 				response.status(404).json({
@@ -5330,7 +5739,25 @@ export async function createApp(options: CreateAppOptions = {}) {
 				return;
 			}
 
-			const requestedStatus = typeof request.body?.status === "string" ? request.body.status : undefined;
+			if (currentPackage.workflow.status === "published") {
+				response.status(400).json({
+					message: "Unpublish the guide package before changing its review record."
+				});
+				return;
+			}
+
+			if (request.body?.reviewer !== undefined) {
+				response.status(400).json({
+					message: "Reviewer identity is recorded from the authenticated admin session."
+				});
+				return;
+			}
+
+			const requestedStatus = parseOptionalEnum(
+				request.body?.status,
+				guidePackageStatuses,
+				"Guide package status"
+			);
 
 			if (requestedStatus === "published") {
 				response.status(400).json({
@@ -5349,25 +5776,25 @@ export async function createApp(options: CreateAppOptions = {}) {
 				return;
 			}
 
+			const reviewFieldsChanged = request.body?.reviewNotes !== undefined
+				|| request.body?.reviewRecommendation !== undefined;
+			const reviewCleared = request.body?.reviewRecommendation === null;
+			const reviewedAt = reviewFieldsChanged
+				? reviewCleared ? null : new Date().toISOString()
+				: undefined;
+
 			await adminRepository.updateGuidePackage(request.params.id, {
-				auditActor: getAdminAuditActor(response),
-				coverageLimits: parseStringArray(request.body?.coverageLimits),
-				coverageNotes: parseStringArray(request.body?.coverageNotes),
-				draftedAt: typeof request.body?.draftedAt === "string" ? request.body.draftedAt : undefined,
+				auditActor: actor,
+				coverageLimits: parseStringArray(request.body?.coverageLimits, "Coverage limits"),
+				coverageNotes: parseStringArray(request.body?.coverageNotes, "Coverage notes"),
 				reviewRecommendation: request.body?.reviewRecommendation === null
 					? null
 					: parseGuidePackageReviewRecommendation(request.body?.reviewRecommendation),
-				reviewNotes: request.body?.reviewNotes === null
-					? null
-					: typeof request.body?.reviewNotes === "string"
-						? request.body.reviewNotes
-						: undefined,
-				reviewedAt: typeof request.body?.reviewedAt === "string" ? request.body.reviewedAt : undefined,
-				reviewer: request.body?.reviewer === null
-					? null
-					: typeof request.body?.reviewer === "string"
-						? request.body.reviewer
-						: undefined,
+				reviewNotes: parseOptionalText(request.body?.reviewNotes, "Review notes", 10_000, { nullable: true }),
+				reviewedAt,
+				reviewer: reviewFieldsChanged
+					? reviewCleared ? null : actor?.displayName || actor?.username
+					: undefined,
 				status: requestedStatus === "draft" || requestedStatus === "in_review" || requestedStatus === "ready_to_publish"
 					? requestedStatus
 					: undefined,
@@ -5388,12 +5815,22 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.post("/api/admin/packages/:id/publish", async (request, response) => {
+		if (!requirePrivilegedAdminRole(response))
+			return;
+
 		try {
 			const currentPackage = await getGuidePackageRecord(request.params.id);
 
 			if (!currentPackage) {
 				response.status(404).json({
 					message: "Guide package not found."
+				});
+				return;
+			}
+
+			if (currentPackage.workflow.status !== "ready_to_publish") {
+				response.status(409).json({
+					message: "Guide package must be in ready to publish status before promotion."
 				});
 				return;
 			}
@@ -5408,10 +5845,19 @@ export async function createApp(options: CreateAppOptions = {}) {
 				return;
 			}
 
-			const reviewer = typeof request.body?.reviewer === "string" ? request.body.reviewer.trim() : currentPackage.workflow.reviewer || "";
-			const reviewRecommendation = request.body?.reviewRecommendation === null
-				? null
-				: parseGuidePackageReviewRecommendation(request.body?.reviewRecommendation) ?? currentPackage.workflow.reviewRecommendation;
+			if (
+				request.body?.reviewer !== undefined
+				|| request.body?.reviewRecommendation !== undefined
+				|| request.body?.reviewNotes !== undefined
+			) {
+				response.status(400).json({
+					message: "Save the authenticated reviewer signoff before publishing; publish requests cannot rewrite it."
+				});
+				return;
+			}
+
+			const reviewer = currentPackage.workflow.reviewer ?? "";
+			const reviewRecommendation = currentPackage.workflow.reviewRecommendation;
 
 			if (!reviewer) {
 				response.status(400).json({
@@ -5433,14 +5879,6 @@ export async function createApp(options: CreateAppOptions = {}) {
 			await adminRepository.updateGuidePackage(request.params.id, {
 				auditActor: getAdminAuditActor(response),
 				publishedAt: now,
-				reviewRecommendation,
-				reviewNotes: request.body?.reviewNotes === null
-					? null
-					: typeof request.body?.reviewNotes === "string"
-						? request.body.reviewNotes
-						: currentPackage.workflow.reviewNotes,
-				reviewedAt: now,
-				reviewer,
 				status: "published",
 			});
 
@@ -5459,8 +5897,12 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.post("/api/admin/packages/:id/unpublish", async (request, response) => {
+		if (!requirePrivilegedAdminRole(response))
+			return;
+
 		try {
 			const currentPackage = await getGuidePackageRecord(request.params.id);
+			const actor = getAdminAuditActor(response);
 
 			if (!currentPackage) {
 				response.status(404).json({
@@ -5469,22 +5911,29 @@ export async function createApp(options: CreateAppOptions = {}) {
 				return;
 			}
 
+			if (currentPackage.workflow.status !== "published") {
+				response.status(409).json({
+					message: "Only a published guide package can be unpublished."
+				});
+				return;
+			}
+
+			const reason = parseOptionalText(request.body?.reason, "Unpublish reason", 2_000)?.trim() ?? "";
+
+			if (!reason) {
+				response.status(400).json({
+					message: "Unpublish reason is required."
+				});
+				return;
+			}
+
 			await adminRepository.updateGuidePackage(request.params.id, {
-				auditActor: getAdminAuditActor(response),
+				auditActor: actor,
 				publishedAt: null,
-				reviewRecommendation: request.body?.reviewRecommendation === null
-					? null
-					: parseGuidePackageReviewRecommendation(request.body?.reviewRecommendation),
-				reviewNotes: request.body?.reviewNotes === null
-					? null
-					: typeof request.body?.reviewNotes === "string"
-						? request.body.reviewNotes
-						: currentPackage.workflow.reviewNotes,
-				reviewer: request.body?.reviewer === null
-					? null
-					: typeof request.body?.reviewer === "string"
-						? request.body.reviewer
-						: currentPackage.workflow.reviewer,
+				reviewRecommendation: "needs_revision",
+				reviewNotes: reason,
+				reviewedAt: new Date().toISOString(),
+				reviewer: actor?.displayName || actor?.username,
 				status: "in_review",
 			});
 
@@ -5507,12 +5956,16 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.patch("/api/admin/sources/:id", async (request, response) => {
+		if (!requirePrivilegedAdminRole(response))
+			return;
+
 		try {
 			response.json(await adminRepository.updateSource(request.params.id, {
-				health: request.body?.health,
-				nextCheckAt: typeof request.body?.nextCheckAt === "string" ? request.body.nextCheckAt : undefined,
-				note: typeof request.body?.note === "string" ? request.body.note : undefined,
-				owner: typeof request.body?.owner === "string" ? request.body.owner : undefined
+				auditActor: getAdminAuditActor(response),
+				health: parseOptionalEnum(request.body?.health, adminSourceHealthValues, "Source health"),
+				nextCheckAt: parseOptionalTimestamp(request.body?.nextCheckAt, "Next source check"),
+				note: parseOptionalText(request.body?.note, "Source note", 2_000),
+				owner: parseOptionalText(request.body?.owner, "Source owner", 200)
 			}));
 		}
 		catch (error) {
@@ -5530,7 +5983,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.post("/api/admin/users", async (request, response) => {
-		if (!requireAdminRole(response))
+		if (!requirePrivilegedAdminRole(response))
 			return;
 
 		try {
@@ -5545,10 +5998,10 @@ export async function createApp(options: CreateAppOptions = {}) {
 
 			await adminRepository.createUser({
 				auditActor: getAdminAuditActor(response),
-				displayName: typeof request.body?.displayName === "string" ? request.body.displayName : "",
-				password: typeof request.body?.password === "string" ? request.body.password : "",
+				displayName: parseOptionalText(request.body?.displayName, "Display name", 200) ?? "",
+				password: parseOptionalText(request.body?.password, "Password", 256) ?? "",
 				role,
-				username: typeof request.body?.username === "string" ? request.body.username : ""
+				username: parseOptionalText(request.body?.username, "Username", 64) ?? ""
 			});
 
 			response.status(201).json(await adminRepository.listUsers());
@@ -5561,7 +6014,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 	});
 
 	app.patch("/api/admin/users/:id", async (request, response) => {
-		if (!requireAdminRole(response))
+		if (!requirePrivilegedAdminRole(response))
 			return;
 
 		try {
@@ -5572,12 +6025,19 @@ export async function createApp(options: CreateAppOptions = {}) {
 				return;
 			}
 
+			const disabled = parseOptionalBoolean(request.body?.disabled, "Disabled");
+			const mfaReset = parseOptionalBoolean(request.body?.mfaReset, "MFA reset");
+			const password = parseOptionalText(request.body?.password, "Password", 256);
+
+			if (disabled === undefined && mfaReset !== true && password === undefined)
+				throw new Error("At least one account change is required.");
+
 			response.json(await adminRepository.updateUser(request.params.id, {
 				auditActor: getAdminAuditActor(response),
-				disabled: typeof request.body?.disabled === "boolean" ? request.body.disabled : undefined,
-				mfaReset: request.body?.mfaReset === true ? true : undefined,
-				password: typeof request.body?.password === "string" ? request.body.password : undefined,
-				passwordChangeMode: typeof request.body?.password === "string" ? "admin-reset" : undefined
+				disabled,
+				mfaReset: mfaReset === true ? true : undefined,
+				password,
+				passwordChangeMode: password !== undefined ? "admin-reset" : undefined
 			}));
 		}
 		catch (error) {
@@ -5610,13 +6070,16 @@ export async function createApp(options: CreateAppOptions = {}) {
 	return app;
 }
 
-export async function startServer(port = Number(process.env.PORT || 3001)) {
+export async function startServer(
+	port = Number(process.env.PORT || 3001),
+	host = process.env.HOST?.trim() || "127.0.0.1"
+) {
 	const app = await createApp();
-	const server = app.listen(port, () => {
-		console.log(`Ballot Clarity API listening on http://127.0.0.1:${port}`);
+	const server = app.listen(port, host, () => {
+		console.log(`Ballot Clarity API listening on http://${host}:${port}`);
 	});
 
-	return { app, port, server };
+	return { app, host, port, server };
 }
 
 function isDirectExecution(metaUrl: string) {

@@ -68,6 +68,7 @@ test("external source asset base still rewrites source-file paths without local 
 				store.resolve("/source-files/missing.txt"),
 				"https://assets.example.test/source-assets/missing.txt"
 			);
+			assert.equal(store.resolve("/coverage"), "/coverage");
 		});
 	});
 });
@@ -78,6 +79,37 @@ test("source-file links with relative traversal are suppressed", () => {
 			const store = createSourceAssetStore({ publicSourceFileDirectory: directory });
 
 			assert.equal(store.resolve("/source-files/../private.txt"), "");
+			assert.equal(store.resolve("/source-files/%2e%2e/private.txt"), "");
+			assert.equal(store.resolve("/source-files/%252e%252e/private.txt"), "");
 		});
 	});
+});
+
+test("public source links reject executable schemes, embedded credentials, and local-network destinations", () => {
+	withSourceAssetBaseUrl(undefined, () => {
+		const store = createSourceAssetStore({ publicSourceFileDirectory: null });
+
+		assert.equal(store.resolve("javascript:alert(1)"), "");
+		assert.equal(store.resolve("data:text/html,test"), "");
+		assert.equal(store.resolve("//attacker.example/source.txt"), "");
+		assert.equal(store.resolve("https://user:secret@example.test/source.txt"), "");
+		assert.equal(store.resolve("http://127.0.0.1/private"), "");
+		assert.equal(store.resolve("http://[::1]/private"), "");
+		assert.equal(store.resolve("http://[::ffff:7f00:1]/private"), "");
+		assert.equal(store.resolve("https://service.internal/private"), "");
+		assert.equal(store.resolve("https:\\\\example.test\\source.txt"), "");
+	});
+});
+
+test("source asset base configuration rejects unsafe or ambiguous URL forms", () => {
+	for (const value of [
+		"javascript:alert(1)",
+		"https://user:secret@assets.example.test/source-files",
+		"https://assets.example.test/source-files?tenant=other",
+		"https:\\\\assets.example.test\\source-files",
+	]) {
+		withSourceAssetBaseUrl(value, () => {
+			assert.throws(() => createSourceAssetStore(), /SOURCE_ASSET_BASE_URL/u);
+		});
+	}
 });

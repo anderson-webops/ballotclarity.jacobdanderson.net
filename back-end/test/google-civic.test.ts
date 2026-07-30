@@ -144,6 +144,32 @@ test("createGoogleCivicClient requests partial voterinfo data before treating th
 	assert.match(result.note, /did not return an election-specific record/i);
 });
 
+test("createGoogleCivicClient bounds provider requests with an abort signal", async () => {
+	let capturedSignal: AbortSignal | null | undefined;
+	const client = createGoogleCivicClient({
+		apiKey: "test-google-civic-key",
+		fetchImpl: (async (_resource, init) => {
+			capturedSignal = init?.signal;
+			return new Response(JSON.stringify({
+				error: {
+					errors: [{ reason: "badRequest" }],
+					message: "Address could not be parsed",
+				},
+			}), {
+				headers: {
+					"Content-Type": "application/json",
+				},
+				status: 400,
+			});
+		}) as typeof fetch,
+		timeoutMs: 5_000,
+	});
+
+	assert.ok(client);
+	await client.lookupVoterInfo("55 Trinity Ave SW, Atlanta, GA 30303");
+	assert.ok(capturedSignal instanceof AbortSignal);
+});
+
 test("createGoogleCivicClient converts election-unknown responses into a fallback note", async () => {
 	const client = createGoogleCivicClient({
 		apiKey: "test-google-civic-key",

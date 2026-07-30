@@ -10,6 +10,7 @@ import { buildFultonOfficialLogisticsOnlySnapshot } from "../back-end/src/fulton
 
 const require = createRequire(import.meta.url);
 const axeSourcePath = require.resolve("axe-core/axe.min.js");
+const axeSource = readFileSync(axeSourcePath, "utf8");
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(scriptDir, "..");
 const frontendPackagePath = resolve(projectRoot, "front-end/package.json");
@@ -650,7 +651,7 @@ async function analyzePage(browser, route, scheme) {
 		await page.close();
 		throw new Error(`${url} produced page errors: ${pageErrors.join(" | ")}`);
 	}
-	await page.addScriptTag({ path: axeSourcePath });
+	await page.evaluate(axeSource);
 	const result = await page.evaluate(async () => {
 		return await globalThis.axe.run(document, {
 			resultTypes: ["violations"],

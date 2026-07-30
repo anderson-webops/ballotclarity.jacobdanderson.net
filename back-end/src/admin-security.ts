@@ -14,6 +14,9 @@ export function buildAdminSecurityStatus(users: AdminUser[]): AdminSecurityStatu
 	const usersWithoutMfa = activeUsers
 		.filter(user => !user.mfaEnabledAt)
 		.map(toSecurityUser);
+	const usersRequiringPasswordChange = activeUsers
+		.filter(user => user.passwordChangeRequiredAt)
+		.map(toSecurityUser);
 	const activeUserCount = activeUsers.length;
 	const mfaEnabledUserCount = activeUsers.filter(user => user.mfaEnabledAt).length;
 
@@ -22,22 +25,36 @@ export function buildAdminSecurityStatus(users: AdminUser[]): AdminSecurityStatu
 			activeAdminCount: 0,
 			activeUserCount: 0,
 			mfaEnabledUserCount: 0,
+			passwordChangeRequiredUserCount: 0,
 			status: "needs_attention",
 			summary: "No active admin-portal users are configured.",
-			usersWithoutMfa: []
+			usersRequiringPasswordChange: [],
+			usersWithoutMfa: [],
 		};
+	}
+
+	const summaryParts: string[] = [];
+
+	if (usersWithoutMfa.length) {
+		summaryParts.push(usersWithoutMfa.length === 1
+			? "1 active admin-portal account still needs MFA."
+			: `${usersWithoutMfa.length} active admin-portal accounts still need MFA.`);
+	}
+
+	if (usersRequiringPasswordChange.length) {
+		summaryParts.push(usersRequiringPasswordChange.length === 1
+			? "1 active account must replace an administrator-issued temporary password."
+			: `${usersRequiringPasswordChange.length} active accounts must replace administrator-issued temporary passwords.`);
 	}
 
 	return {
 		activeAdminCount: activeUsers.filter(user => user.role === "admin").length,
 		activeUserCount,
 		mfaEnabledUserCount,
-		status: usersWithoutMfa.length ? "needs_attention" : "healthy",
-		summary: usersWithoutMfa.length
-			? usersWithoutMfa.length === 1
-				? "1 active admin-portal account still needs MFA."
-				: `${usersWithoutMfa.length} active admin-portal accounts still need MFA.`
-			: "All active admin-portal accounts have MFA enabled.",
-		usersWithoutMfa
+		passwordChangeRequiredUserCount: usersRequiringPasswordChange.length,
+		status: summaryParts.length ? "needs_attention" : "healthy",
+		summary: summaryParts.join(" ") || "All active admin-portal accounts have MFA enabled and no temporary passwords remain.",
+		usersRequiringPasswordChange,
+		usersWithoutMfa,
 	};
 }

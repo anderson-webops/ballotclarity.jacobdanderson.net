@@ -146,3 +146,60 @@ test("representative module enrichment degrades provider failures into structure
 		/OpenFEC request failed: 500 Internal Server Error/,
 	);
 });
+
+test("representative module enrichment bounds and expires its provider attachment cache", async () => {
+	let currentTime = Date.parse("2026-04-18T18:45:00.000Z");
+	let searches = 0;
+	const resolver = createRepresentativeModuleResolver({
+		cacheMaxEntries: 1,
+		cacheTtlMs: 1_000,
+		now: () => new Date(currentTime),
+		openFecClient: {
+			async getCommitteeTotals() {
+				return null;
+			},
+			async searchCandidates() {
+				searches += 1;
+				return [];
+			}
+		}
+	});
+
+	await resolver.enrichNationwidePersonProfile(testContext, testProfileResponse);
+	await resolver.enrichNationwidePersonProfile(testContext, testProfileResponse);
+	assert.equal(searches, 1);
+
+	const secondContext: ActiveNationwideLookupContext = {
+		...testContext,
+		districtMatches: [{
+			...testContext.districtMatches[0],
+			districtCode: "4",
+			id: "congressional:4",
+			label: "Congressional District 4"
+		}],
+		representativeMatches: [{
+			...testContext.representativeMatches[0],
+			districtLabel: "Representative UT-4",
+			id: "ocd-person:test-jane-example",
+			name: "Jane Example"
+		}]
+	};
+	const secondProfile: PersonProfileResponse = {
+		...testProfileResponse,
+		person: {
+			...testProfileResponse.person,
+			districtLabel: "Representative UT-4",
+			slug: "jane-example"
+		}
+	};
+
+	await resolver.enrichNationwidePersonProfile(secondContext, secondProfile);
+	assert.equal(searches, 2);
+
+	await resolver.enrichNationwidePersonProfile(testContext, testProfileResponse);
+	assert.equal(searches, 3);
+
+	currentTime += 1_001;
+	await resolver.enrichNationwidePersonProfile(testContext, testProfileResponse);
+	assert.equal(searches, 4);
+});

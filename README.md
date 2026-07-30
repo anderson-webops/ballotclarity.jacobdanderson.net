@@ -144,7 +144,7 @@ For federal provider setup:
 - `DATA_API_KEY` is the shared `api.data.gov` credential. Ballot Clarity will use it as a fallback for both Congress.gov and OpenFEC when `CONGRESS_API_KEY` or `OPENFEC_API_KEY` are unset.
 - If you prefer separate credentials later, set `CONGRESS_API_KEY` and `OPENFEC_API_KEY` explicitly and they will take precedence over `DATA_API_KEY`.
 - `GOOGLE_CIVIC_FORCE_IPV4=true` makes Ballot Clarity use an IPv4-only HTTPS transport for Google Civic requests without changing global Node networking behavior.
-- `OPENSTATES_FETCH_TIMEOUT_MS` bounds Open States requests so scheduled sync jobs fail or degrade cleanly instead of hanging indefinitely.
+- `OPENSTATES_FETCH_TIMEOUT_MS`, `OPENFEC_FETCH_TIMEOUT_MS`, and `LDA_FETCH_TIMEOUT_MS` bound provider requests so runtime and scheduled workflows fail or degrade cleanly instead of hanging indefinitely.
 
 To verify the currently configured provider keys without printing them:
 
@@ -188,16 +188,20 @@ Public runtime variables:
 
 - `NUXT_PUBLIC_SITE_URL`: canonical public origin used for metadata, schema, and canonical URLs
 - `NUXT_PUBLIC_API_BASE`: public API base used by the front-end for ballot, search, sources, and content reads
+- `NUXT_PUBLIC_API_FETCH_TIMEOUT_MS`: positive public API request timeout in milliseconds for browser, SSR, and sitemap reads; defaults to 15 seconds
 - `NUXT_PUBLIC_BUILD_ID`: optional deploy or release identifier exposed to the client so stale tabs can detect a newer server build and force a safe refresh instead of failing on missing hashed chunks
 
 Local infrastructure variables:
 
-- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT`: values used by the local Docker Postgres service and the derived `ADMIN_DATABASE_URL`
-- `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET`, `MINIO_PORT`, `MINIO_CONSOLE_PORT`: values used by the local MinIO service and bucket bootstrap
+- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_BIND_ADDRESS`, `POSTGRES_PORT`: values used by the local Docker Postgres service and the derived `ADMIN_DATABASE_URL`
+- `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET`, `MINIO_BIND_ADDRESS`, `MINIO_PORT`, `MINIO_CONSOLE_BIND_ADDRESS`, `MINIO_CONSOLE_PORT`: values used by the local MinIO service and bucket bootstrap
+
+The Compose stack is development-only. It pins container images by immutable digest, requires generated passwords, and binds database/object-storage ports to loopback by default. Do not use the local Compose file as a production topology or change the bind addresses to a public interface without a separate firewall and access-control review.
 
 Server-only variables:
 
 - `ADMIN_API_BASE`: server-side Nuxt proxy target for admin-only API requests; this should be private to the Nuxt server and never exposed as the browser's direct `/api/admin/*` target
+- `ADMIN_API_FETCH_TIMEOUT_MS`: positive server-to-server admin API request timeout in milliseconds; defaults to 15 seconds
 - `ADMIN_API_KEY`: shared secret between the Nuxt admin proxy and the Express admin endpoints
 - `ADMIN_SESSION_SECRET`: cookie-signing secret for Nuxt admin sessions
 - `ADMIN_MFA_ENCRYPTION_KEY`: dedicated authenticated-encryption key for admin TOTP seeds at rest; use a unique random value of at least 32 characters
@@ -208,16 +212,24 @@ Server-only variables:
 - `ADMIN_DATABASE_URL`: Postgres connection string for the admin and editorial operations store
 - `CONTACT_ADDRESS`: support email address returned by the protected `/api/contact-address` route after the same-origin nonce challenge succeeds
 - `CONTACT_ADDRESS_SESSION_SECRET`: server-only secret that signs short-lived protected-contact nonce sessions; use a dedicated value in production rather than reusing admin session secrets
-- `PUBLIC_FEEDBACK_RATE_LIMIT_WINDOW_MS`, `PUBLIC_FEEDBACK_RATE_LIMIT_MAX`: optional in-memory abuse controls for repeated public contact/correction form submissions from the same connection; values must be positive integers when set
-- `PUBLIC_LOOKUP_RATE_LIMIT_WINDOW_MS`, `PUBLIC_LOOKUP_RATE_LIMIT_MAX`: optional in-memory abuse controls for repeated public civic lookup requests from the same connection; values must be positive integers when set
+- `CONTACT_ADDRESS_RATE_LIMIT_WINDOW_MS`, `CONTACT_ADDRESS_RATE_LIMIT_MAX`, `CONTACT_ADDRESS_RATE_LIMIT_MAX_BUCKETS`: optional in-memory abuse controls for the protected contact endpoint; the bucket cap defaults to 10,000 and fails closed for unseen connections when full
+- `PUBLIC_FEEDBACK_RATE_LIMIT_WINDOW_MS`, `PUBLIC_FEEDBACK_RATE_LIMIT_MAX`, `PUBLIC_FEEDBACK_RATE_LIMIT_MAX_BUCKETS`: optional in-memory abuse controls for repeated public contact/correction form submissions from the same connection; the bucket cap defaults to 10,000 and fails closed for unseen connections when full
+- `PUBLIC_LOOKUP_RATE_LIMIT_WINDOW_MS`, `PUBLIC_LOOKUP_RATE_LIMIT_MAX`, `PUBLIC_LOOKUP_RATE_LIMIT_MAX_BUCKETS`: optional in-memory abuse controls for repeated public civic lookup requests from the same connection; the bucket cap defaults to 10,000 and fails closed for unseen connections when full
+- `LOCATION_GUESS_MODE`, `LOCATION_GUESS_PROXY_HEADERS_TRUSTED`, and `LOCATION_GUESS_PROXY_*_HEADERS`: optional approximate location guessing from trusted edge-proxy geography; `proxy_headers` remains fail-closed until provenance is explicitly asserted, and the edge must remove client-supplied copies before overwriting the configured headers
 - `SOURCE_ASSET_BASE_URL`: optional public object-storage or CDN base URL for mirrored source files
 - `LIVE_COVERAGE_FILE`: path to the imported coverage snapshot consumed by the public API
 - `LIVE_COVERAGE_REQUIRED`: when `true`, fail startup if `LIVE_COVERAGE_FILE` is missing
+- `HOST`: Express API bind address; defaults to loopback (`127.0.0.1`) and should only use a broader interface when a private container or platform network requires it
 - `TRUST_PROXY`: explicit trusted reverse-proxy IPs, CIDR ranges, or named ranges; use `loopback` for same-host Nginx and never use broad `true` trust
 - `LOG_LEVEL`: structured backend log level, such as `info`, `warn`, or `error`
-- `ADMIN_LOGIN_WINDOW_MS`, `ADMIN_LOGIN_MAX_ATTEMPTS`, `ADMIN_LOGIN_IP_MAX_ATTEMPTS`, `ADMIN_LOGIN_LOCKOUT_MS`: independent account and source-IP login-throttle controls for the backend auth endpoint; values must be positive integers when set
+- `ADMIN_LOGIN_WINDOW_MS`, `ADMIN_LOGIN_MAX_ATTEMPTS`, `ADMIN_LOGIN_IP_MAX_ATTEMPTS`, `ADMIN_LOGIN_LOCKOUT_MS`, `ADMIN_LOGIN_MAX_BUCKETS`: independent account and source-IP verification throttles shared by login, password-change, and MFA workflows; the bucket cap bounds memory and fails closed for previously unseen account/address pairs when full; values must be positive integers when set
 - `GOOGLE_CIVIC_FORCE_IPV4`: when `true`, Google Civic requests prefer IPv4 egress so IPv4-restricted API keys work on hosts that otherwise default to IPv6
-- `OPENSTATES_FETCH_TIMEOUT_MS`: optional Open States request timeout in milliseconds for scheduled provider syncs
+- `GOOGLE_CIVIC_FETCH_TIMEOUT_MS`, `CONGRESS_FETCH_TIMEOUT_MS`, `CENSUS_GEOCODER_FETCH_TIMEOUT_MS`, `ZIP_LOCATION_FETCH_TIMEOUT_MS`, `OPENSTATES_FETCH_TIMEOUT_MS`, `OPENFEC_FETCH_TIMEOUT_MS`, `LDA_FETCH_TIMEOUT_MS`: positive request timeouts in milliseconds for upstream civic providers; each defaults to 15 seconds so a stalled provider cannot hold an API request open indefinitely
+- `PROVIDER_RESPONSE_MAX_BYTES`: maximum decoded response body accepted from any civic provider; defaults to 5 MiB so a malformed or compromised upstream cannot exhaust process memory
+- `ADDRESS_CACHE_MAX_ROWS`: maximum newest encrypted address-lookup rows retained inside the seven-day expiration window; defaults to 100,000
+- `REPRESENTATIVE_MODULE_CACHE_MAX_ENTRIES`, `REPRESENTATIVE_MODULE_CACHE_TTL_MS`: bounds the in-process provider-enrichment cache; defaults to 1,000 least-recently-used entries with a 15-minute freshness window
+- `PUBLIC_REPRESENTATIVE_CACHE_MAX_ENTRIES`, `PUBLIC_REPRESENTATIVE_CACHE_TTL_MS`: bounds direct provider-backed representative identity lookups; defaults to 1,000 least-recently-used entries with a 15-minute freshness window, while the public lookup throttle limits request volume
+- `BALLOTCLARITY_ZIP_LOOKUP_LOG_ENABLED`, `BALLOTCLARITY_ZIP_LOOKUP_LOG_PATH`, `BALLOTCLARITY_ZIP_LOOKUP_LOG_MAX_BYTES`: optional privacy-minimized exact-ZIP event logging; the active file is permission-restricted, rotates to one permission-restricted backup at 10 MiB by default, and never records full addresses, network addresses, or user agents
 - `CENSUS_GEOCODER_BENCHMARK`, `CENSUS_GEOCODER_VINTAGE`: optional overrides for reproducible Census geocoder lookups
 - `CTCL_BIP_API_URL`, `CTCL_BIP_API_KEY`: optional Center for Tech and Civic Life Ballot Information Project endpoint and access key once direct access is granted
 - `BALLOTPEDIA_API_KEY`, `BALLOTPEDIA_API_BASE_URL`: optional Ballotpedia API credentials and base URL override for future race, candidate, and measure ingestion
@@ -231,8 +243,9 @@ One-time bootstrap variables:
 - `ADMIN_BOOTSTRAP_DISPLAY_NAME`: display label for the initial admin user
 - `ADMIN_BOOTSTRAP_ROLE`: initial role, usually `admin`
 
-Runtime variable:
+Runtime variables:
 
+- `HOST`: Express API bind address, defaulting to `127.0.0.1`
 - `PORT`: Express API port
 
 One-time or scheduled ingestion variables:
@@ -354,6 +367,10 @@ How the admin model works:
 - Nuxt proxies protected admin requests to the Express API using `ADMIN_API_KEY`, so the backend key never reaches the browser.
 - Browser traffic for `/api/admin/*` is expected to terminate at Nuxt. The Express admin endpoints are internal API surfaces behind `ADMIN_API_BASE`, not public browser routes.
 - Admins can create, disable, restore, reset temporary passwords, and reset MFA enrollment for admin/editor accounts. Signed-in admins and editors can enable or disable app-based TOTP MFA and change their own passwords from the Account page. Disabled accounts cannot start new sessions, and password/MFA changes invalidate existing sessions by rotating the account credential timestamp checked by the Nuxt admin bridge.
+- Roles are immutable after account creation: promotion or demotion requires creating a replacement account with the intended role and disabling the old account. The database prevents disabling the final active admin, and administrative recovery cannot target the operator's own current account.
+- Publishing, unpublishing, live-content changes, content rollback, source-health mutations, and account creation/recovery require an admin session that completed MFA. Editors retain draft/review work but cannot mutate live content or perform publication and account-management actions.
+- Content approver and guide-package reviewer identities are derived from the current authenticated account rather than accepted from browser input. Unpublishing a guide package requires a reason, returns it to review, and requires fresh reviewer signoff before another publication.
+- Public correction submissions enter a private `new` intake state. Promotion into `triaged`, `researching`, or `resolved`, later public edits, and demotion back to private intake require an MFA-enabled admin and are recorded in the immutable audit trail; reporter identity is never returned by the public corrections API.
 - The admin dashboard includes an account-security summary from `/api/admin/overview`, showing active admin-portal users, MFA-enabled users, and active accounts that still need MFA. The summary never exposes stored TOTP secrets.
 - Admin data includes content publish state, reviewer approval metadata, persisted public-summary overrides, content history and rollback points, correction intake with content-record linkage, source-health monitoring, activity logs, user management, and a hash-chained append-only audit trail for critical publish/account actions.
 
@@ -468,7 +485,7 @@ Local stack notes:
 1. Normalize upstream civic data into the snapshot shape used by `back-end/src/coverage-repository.ts`.
 2. Attach a metadata sidecar at `<snapshot>.meta.json` with `status`, `sourceType`, `sourceLabel`, and review or approval timestamps.
 3. Validate that reviewed and production-approved snapshots do not contain seeded, staged-reference, or mixed guide content.
-4. Promote the candidate snapshot with `npm run -w back-end manage:coverage -- promote --from <candidate-snapshot.json> --target "$LIVE_COVERAGE_FILE"`.
+4. Promote the candidate snapshot with `npm run -w back-end manage:coverage -- promote --from <candidate-snapshot.json> --target "$LIVE_COVERAGE_FILE"`. Promotion re-validates publication eligibility, stages the snapshot and metadata sidecar together, and replaces the data before the approval metadata so older content is never paired with newer approval state.
 5. Verify `/health`, `/api/coverage`, `/api/status`, `/api/elections`, `/api/guide-packages/:id`, `/ballot/:slug`, and a representative lookup after restart or reload.
 6. Keep the public response contracts stable in the backend so the Nuxt composables and pages do not need to change.
 7. Replace bundled source files with object storage or CDN delivery behind `SOURCE_ASSET_BASE_URL` when source-file scale requires it.
@@ -484,7 +501,7 @@ Local stack notes:
 5. Import or promote the first vetted coverage snapshot, then enable `LIVE_COVERAGE_REQUIRED=true` when the environment should fail closed without current snapshot data.
 6. Configure `SOURCE_ASSET_BASE_URL` when source files should resolve to object storage or a CDN instead of bundled static files.
 7. Put the API behind HTTPS and a reverse proxy or platform ingress that sends public `/api/admin/*` traffic to Nuxt, while the Nuxt server reaches the Express admin API over `ADMIN_API_BASE`.
-8. Ensure the backend deploy artifact includes `dist/admin-schema.sql` and `dist/admin-schema.postgres.sql`; the build now copies both automatically, but the deployed runtime should still be checked once after merge.
+8. Ensure the backend deploy artifact passes its built-in runtime import and asset check. The build copies both admin schemas and the live-data schema, then rejects any missing compiled relative import before deployment.
 9. Configure log drains, alerts, and request-ID propagation in the platform so structured backend logs are actually usable during incidents.
 10. Run `npm run verify:production` in the active environment and resolve every error before marking the deploy ready.
 

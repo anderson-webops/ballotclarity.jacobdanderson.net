@@ -50,6 +50,14 @@ test("accessibility smoke shuts down Nuxt deterministically in CI", () => {
 	assert.match(workflow, /^\s{2}accessibility:\n\s{4}runs-on: ubuntu-latest\n\s{4}timeout-minutes: 10/m);
 });
 
+test("accessibility smoke evaluates axe through browser automation without an inline script tag", () => {
+	const smokeScript = readText("scripts/a11y-smoke.mjs");
+
+	assert.match(smokeScript, /const axeSource = readFileSync\(axeSourcePath, "utf8"\)/);
+	assert.match(smokeScript, /await page\.evaluate\(axeSource\)/);
+	assert.doesNotMatch(smokeScript, /page\.addScriptTag/);
+});
+
 test("location key-date notes remain definition-list descriptions", () => {
 	const locationPage = readText("front-end/src/pages/locations/[slug].vue");
 	const keyDatesSection = locationPage.slice(

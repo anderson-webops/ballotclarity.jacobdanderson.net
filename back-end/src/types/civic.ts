@@ -1332,11 +1332,15 @@ export type AdminAuditEventType
 		| "admin_user_password_change"
 		| "admin_user_password_reset"
 		| "admin_user_restore"
+		| "correction_public_update"
+		| "correction_publish"
+		| "correction_unpublish"
 		| "content_publish"
 		| "content_rollback"
 		| "content_unpublish"
 		| "guide_package_publish"
-		| "guide_package_unpublish";
+		| "guide_package_unpublish"
+		| "source_monitor_update";
 
 export type AdminSubmissionType = "correction" | "feedback";
 
@@ -1471,6 +1475,7 @@ export interface AdminUser {
 	disabledAt?: string;
 	lastLoginAt?: string;
 	mfaEnabledAt?: string;
+	passwordChangeRequiredAt?: string;
 }
 
 export interface AdminSecurityUser {
@@ -1484,9 +1489,11 @@ export interface AdminSecurityStatus {
 	activeAdminCount: number;
 	activeUserCount: number;
 	mfaEnabledUserCount: number;
+	passwordChangeRequiredUserCount: number;
 	status: "healthy" | "needs_attention";
 	summary: string;
 	usersWithoutMfa: AdminSecurityUser[];
+	usersRequiringPasswordChange: AdminSecurityUser[];
 }
 
 export interface AdminOverviewResponse {
@@ -1543,6 +1550,7 @@ export interface AdminSessionResponse {
 	displayName: string | null;
 	mfaEnabledAt?: string;
 	mfaRequired?: boolean;
+	passwordChangeRequiredAt?: string;
 	role: AdminUserRole | null;
 	username: string | null;
 }

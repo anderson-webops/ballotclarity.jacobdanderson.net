@@ -17,27 +17,53 @@ function assertWorkflowCancelsStaleRuns(path: string) {
 
 test("GitHub workflows cancel stale runs for the same branch or pull request", () => {
 	assertWorkflowCancelsStaleRuns(".github/workflows/ci.yml");
+	assertWorkflowCancelsStaleRuns(".github/workflows/codeql.yml");
 	assertWorkflowCancelsStaleRuns(".github/workflows/qodana_code_quality.yml");
 });
 
-test("GitHub workflows use Node 24-compatible action majors", () => {
+test("GitHub workflows pin every third-party action to a commit", () => {
 	const workflows = [
 		readText(".github/workflows/ci.yml"),
+		readText(".github/workflows/codeql.yml"),
 		readText(".github/workflows/qodana_code_quality.yml"),
 	].join("\n");
+	const actionReferences = [...workflows.matchAll(/^\s*uses:\s+([^@\s]+)@([^\s#]+)/gmu)];
 
-	assert.doesNotMatch(workflows, /actions\/checkout@v4/);
-	assert.doesNotMatch(workflows, /actions\/setup-node@v4/);
-	assert.match(workflows, /actions\/checkout@v7/);
-	assert.match(workflows, /actions\/setup-node@v7/);
+	assert.ok(actionReferences.length > 0);
+	for (const [, action, reference] of actionReferences)
+		assert.match(reference, /^[a-f\d]{40}$/u, `${action} must use a full commit SHA`);
+
+	assert.match(workflows, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/);
+	assert.match(workflows, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
+	assert.match(workflows, /github\/codeql-action\/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81/);
 });
 
 test("CI runs the repository security audit policy", () => {
 	const workflow = readText(".github/workflows/ci.yml");
 
 	assert.match(workflow, /^\s{2}security-audit:/m);
-	assert.match(workflow, /run: npm ci/);
+	assert.match(workflow, /run: npm ci --include=optional/);
+	assert.match(workflow, /name: Verify standalone backend lockfile\s+run: npm run verify:backend-lockfile/);
 	assert.match(workflow, /name: Security audit policy\s+run: npm run audit/);
+	assert.match(workflow, /name: Production dependency audit\s+run: npm run audit:production/);
+});
+
+test("CI verifies the deploy host's ARM64 native dependency path", () => {
+	const workflow = readText(".github/workflows/ci.yml");
+
+	assert.match(workflow, /^\s{2}native-arm64:/m);
+	assert.match(workflow, /runs-on: ubuntu-24\.04-arm/);
+	assert.match(workflow, /run: npm run verify:native-bindings/);
+	assert.match(workflow, /run: npm run build/);
+});
+
+test("CodeQL uses the extended JavaScript security suite with least-privilege permissions", () => {
+	const workflow = readText(".github/workflows/codeql.yml");
+
+	assert.match(workflow, /^permissions:\n\s{2}contents: read\n\s{2}security-events: write/m);
+	assert.match(workflow, /languages: javascript-typescript/);
+	assert.match(workflow, /queries: security-extended/);
+	assert.match(workflow, /run: npm ci --include=optional/);
 });
 
 test("CI runs the production configuration policy", () => {

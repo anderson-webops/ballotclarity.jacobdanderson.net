@@ -33,7 +33,7 @@ defineProps<{
 
 		<ol class="section-nav-list">
 			<li v-for="item in items" :key="item.href">
-				<a :href="item.href" class="section-nav-link focus-ring">
+				<SafeExternalLink :href="item.href" :new-tab="false" class="section-nav-link focus-ring">
 					<span class="min-w-0">
 						<span class="section-nav-link__label">{{ item.label }}</span>
 						<span v-if="item.note" class="section-nav-link__note">{{ item.note }}</span>
@@ -41,7 +41,7 @@ defineProps<{
 					<span v-if="item.badge" class="section-nav-link__badge">
 						{{ item.badge }}
 					</span>
-				</a>
+				</SafeExternalLink>
 			</li>
 		</ol>
 

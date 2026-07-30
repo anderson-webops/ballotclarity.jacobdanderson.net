@@ -13,6 +13,9 @@ const baseLinks = [
 ];
 
 const navLinks = computed(() => {
+	if (session.value?.passwordChangeRequiredAt)
+		return [{ label: "Account", to: "/admin/account" }];
+
 	if (session.value?.role === "admin") {
 		return [
 			...baseLinks,
@@ -47,7 +50,7 @@ async function signOut() {
 			<div class="app-shell py-3 space-y-3 lg:py-4">
 				<div class="flex gap-3 items-center justify-between">
 					<div class="min-w-0">
-						<NuxtLink to="/admin" class="rounded-full inline-flex gap-3 items-center focus-ring">
+						<NuxtLink :to="session?.passwordChangeRequiredAt ? '/admin/account' : '/admin'" class="rounded-full inline-flex gap-3 items-center focus-ring">
 							<span class="text-app-ink border border-app-line rounded-2xl bg-white inline-flex shrink-0 h-10 w-10 shadow-sm items-center justify-center dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark sm:h-11 sm:w-11">
 								<span class="i-carbon-settings-adjust text-xl" />
 							</span>
@@ -84,6 +87,9 @@ async function signOut() {
 						{{ link.label }}
 					</NuxtLink>
 				</nav>
+				<p v-if="session?.passwordChangeRequiredAt" class="text-sm text-[#8B3A2E] px-4 py-3 rounded-2xl bg-[#F8E6E1] dark:text-[#FFD4CB] dark:bg-[#472722]">
+					Change the administrator-issued temporary password before using the rest of the admin workspace.
+				</p>
 			</div>
 		</header>
 

@@ -17,6 +17,7 @@ import type {
 	Source,
 	TrustBullet,
 } from "./types/civic.js";
+import process from "node:process";
 import { buildNationwideRepresentativeSlug } from "./active-nationwide-lookup.js";
 import { isCurrentCongressMemberRecord } from "./congress.js";
 import { buildCongressProfileImages, uniqueProfileImages } from "./profile-images.js";
@@ -137,6 +138,8 @@ const stateNameToCode = new Map<string, string>([
 ]);
 
 interface CreateRepresentativeModuleResolverOptions {
+	cacheMaxEntries?: number;
+	cacheTtlMs?: number;
 	congressClient?: CongressClient | null;
 	ldaClient?: LdaClient | null;
 	now?: () => Date;
@@ -174,6 +177,11 @@ interface CongressAttachment {
 	profileImages?: ProfileImage[];
 	sources: Source[];
 	whatWeKnow: TrustBullet[];
+}
+
+interface CachedRepresentativeModuleAttachment {
+	expiresAt: number;
+	value: Promise<RepresentativeModuleAttachment>;
 }
 
 interface RepresentativeModuleAttachment {
@@ -1091,6 +1099,11 @@ function buildCongressSources(member: CongressMemberDetail): Source[] {
 	return uniqueSources(sources);
 }
 
+function resolvePositiveInteger(value: number | string | null | undefined, fallback: number) {
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function buildCongressTermOfficeContext(member: CongressMemberDetail): PersonProfileOfficeContext {
 	const terms = [...member.terms].sort((left, right) =>
 		right.congress - left.congress
@@ -1386,24 +1399,52 @@ function buildOfficeContextBlock(
 }
 
 export function createRepresentativeModuleResolver({
+	cacheMaxEntries = resolvePositiveInteger(process.env.REPRESENTATIVE_MODULE_CACHE_MAX_ENTRIES, 1_000),
+	cacheTtlMs = resolvePositiveInteger(process.env.REPRESENTATIVE_MODULE_CACHE_TTL_MS, 15 * 60 * 1000),
 	congressClient = null,
 	ldaClient = null,
 	now = () => new Date(),
 	openFecClient = null,
 }: CreateRepresentativeModuleResolverOptions = {}): RepresentativeModuleResolver {
-	const attachmentCache = new Map<string, Promise<RepresentativeModuleAttachment>>();
+	const resolvedCacheMaxEntries = resolvePositiveInteger(cacheMaxEntries, 1_000);
+	const resolvedCacheTtlMs = resolvePositiveInteger(cacheTtlMs, 15 * 60 * 1000);
+	const attachmentCache = new Map<string, CachedRepresentativeModuleAttachment>();
+
+	function pruneAttachmentCache(currentTime: number) {
+		for (const [key, cached] of attachmentCache.entries()) {
+			if (cached.expiresAt <= currentTime)
+				attachmentCache.delete(key);
+		}
+	}
+
+	function makeAttachmentCacheRoom() {
+		while (attachmentCache.size >= resolvedCacheMaxEntries) {
+			const oldestKey = attachmentCache.keys().next().value as string | undefined;
+
+			if (!oldestKey)
+				return;
+
+			attachmentCache.delete(oldestKey);
+		}
+	}
 
 	async function resolveAttachment(context: ActiveNationwideLookupContext, match: LocationRepresentativeMatch): Promise<RepresentativeModuleAttachment> {
 		const target = inferFederalRepresentativeTarget(context, match);
 		const officeholderLayer = inferOfficeholderLayer(context, match, target);
 		const contextStateName = context.location?.state || inferContextStateCode(context) || "this jurisdiction";
 		const cacheKey = target?.cacheKey || `nonfederal:${context.location?.state || "unknown"}:${personSlug(match)}`;
+		const currentDate = now();
+		const currentTime = currentDate.getTime();
+		pruneAttachmentCache(currentTime);
 		const cached = attachmentCache.get(cacheKey);
 
-		if (cached)
-			return await cached;
+		if (cached) {
+			attachmentCache.delete(cacheKey);
+			attachmentCache.set(cacheKey, cached);
+			return await cached.value;
+		}
 
-		const currentYear = now().getUTCFullYear();
+		const currentYear = currentDate.getUTCFullYear();
 		const pending = (async () => {
 			let congressAttachment: CongressAttachment | null = null;
 			let congressErrorStatus: PersonProfileEnrichmentStatusItem | null = null;
@@ -1538,11 +1579,17 @@ export function createRepresentativeModuleResolver({
 				biography: congressAttachment?.biography ?? [],
 			};
 		})().catch((error) => {
-			attachmentCache.delete(cacheKey);
+			if (attachmentCache.get(cacheKey)?.value === pending)
+				attachmentCache.delete(cacheKey);
+
 			throw error;
 		});
 
-		attachmentCache.set(cacheKey, pending);
+		makeAttachmentCacheRoom();
+		attachmentCache.set(cacheKey, {
+			expiresAt: currentTime + resolvedCacheTtlMs,
+			value: pending
+		});
 		return await pending;
 	}
 

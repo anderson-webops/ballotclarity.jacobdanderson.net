@@ -1,4 +1,6 @@
 import process from "node:process";
+import { readProviderResponseJson } from "./fetch-response.js";
+import { createFetchTimeoutSignal, resolveFetchTimeoutMs } from "./fetch-timeout.js";
 
 export interface CongressMemberRecord {
 	bioguideId: string;
@@ -59,6 +61,7 @@ export interface CongressClient {
 interface CongressClientOptions {
 	apiKey?: string;
 	fetchImpl?: typeof fetch;
+	timeoutMs?: number;
 }
 
 interface CongressMembersResponse {
@@ -145,9 +148,11 @@ export function isCurrentCongressMemberRecord(member: CongressMemberRecord) {
 
 export function createCongressClient({
 	apiKey = process.env.CONGRESS_API_KEY?.trim() || process.env.DATA_API_KEY?.trim(),
-	fetchImpl = fetch
+	fetchImpl = fetch,
+	timeoutMs = resolveFetchTimeoutMs(process.env.CONGRESS_FETCH_TIMEOUT_MS),
 }: CongressClientOptions = {}): CongressClient | null {
 	const resolvedApiKey = apiKey?.trim();
+	const resolvedTimeoutMs = resolveFetchTimeoutMs(timeoutMs);
 
 	if (!resolvedApiKey)
 		return null;
@@ -168,13 +173,14 @@ export function createCongressClient({
 				const response = await fetchImpl(requestUrl, {
 					headers: {
 						Accept: "application/json"
-					}
+					},
+					signal: createFetchTimeoutSignal(resolvedTimeoutMs),
 				});
 
 				if (!response.ok)
 					throw new Error(`Congress member lookup failed: ${response.status} ${response.statusText}`);
 
-				const payload = await response.json() as CongressMembersResponse;
+				const payload = await readProviderResponseJson<CongressMembersResponse>(response);
 				const pageMembers = (payload.members ?? []).map(member => ({
 					bioguideId: member.bioguideId?.trim() || "unknown-member",
 					currentMember: deriveCurrentMemberFromTerms(member.terms?.item),
@@ -205,7 +211,8 @@ export function createCongressClient({
 			const response = await fetchImpl(requestUrl, {
 				headers: {
 					Accept: "application/json"
-				}
+				},
+				signal: createFetchTimeoutSignal(resolvedTimeoutMs),
 			});
 
 			if (response.status === 404)
@@ -214,7 +221,7 @@ export function createCongressClient({
 			if (!response.ok)
 				throw new Error(`Congress member lookup failed: ${response.status} ${response.statusText}`);
 
-			const payload = await response.json() as CongressMemberDetailResponse;
+			const payload = await readProviderResponseJson<CongressMemberDetailResponse>(response);
 			const member = payload.member;
 
 			if (!member?.bioguideId || !member?.directOrderName)
@@ -270,13 +277,14 @@ export function createCongressClient({
 			const response = await fetchImpl(requestUrl, {
 				headers: {
 					Accept: "application/json"
-				}
+				},
+				signal: createFetchTimeoutSignal(resolvedTimeoutMs),
 			});
 
 			if (!response.ok)
 				throw new Error(`Congress member lookup failed: ${response.status} ${response.statusText}`);
 
-			const payload = await response.json() as CongressMembersResponse;
+			const payload = await readProviderResponseJson<CongressMembersResponse>(response);
 
 			return (payload.members ?? []).map(member => ({
 				bioguideId: member.bioguideId?.trim() || "unknown-member",

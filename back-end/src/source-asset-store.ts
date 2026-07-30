@@ -2,21 +2,47 @@ import { existsSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { hasUnsafeHrefCharacters, normalizePublicHref } from "./public-href.js";
 
 export type SourceAssetMode = "external-base" | "public-mirror";
-const httpProtocolPattern = /^https?:\/\//i;
-const leadingSlashPattern = /^\/+/;
 
 export interface SourceAssetStoreOptions {
 	publicSourceFileDirectory?: string | null;
 }
 
-function trimTrailingSlash(value: string) {
-	return value.endsWith("/") ? value.slice(0, -1) : value;
+function parseSourceAssetBaseUrl(value: string) {
+	if (!value)
+		return null;
+
+	if (hasUnsafeHrefCharacters(value))
+		throw new Error("SOURCE_ASSET_BASE_URL must not contain control characters or backslashes.");
+
+	let parsed: URL;
+
+	try {
+		parsed = new URL(value);
+	}
+	catch {
+		throw new Error("SOURCE_ASSET_BASE_URL must be a valid HTTP or HTTPS URL.");
+	}
+
+	if (
+		(parsed.protocol !== "http:" && parsed.protocol !== "https:")
+		|| parsed.username
+		|| parsed.password
+		|| parsed.search
+		|| parsed.hash
+	) {
+		throw new Error("SOURCE_ASSET_BASE_URL must be an HTTP or HTTPS URL without credentials, a query, or a fragment.");
+	}
+
+	parsed.pathname = parsed.pathname.replace(/\/+$/u, "");
+	return parsed.href.replace(/\/$/u, "");
 }
 
 function normalizeSourceAssetPath(url: string) {
-	return url.startsWith("/source-files/") ? url.slice("/source-files/".length) : url.replace(leadingSlashPattern, "");
+	const parsed = new URL(url, "https://ballotclarity.invalid");
+	return parsed.pathname.slice("/source-files/".length);
 }
 
 function isPublicSourceFileUrl(url: string) {
@@ -24,7 +50,15 @@ function isPublicSourceFileUrl(url: string) {
 }
 
 function isSafeSourceAssetPath(assetPath: string) {
-	return !assetPath.split(/[\\/]/).includes("..");
+	try {
+		const decoded = decodeURIComponent(assetPath);
+		return Boolean(decoded)
+			&& !hasUnsafeHrefCharacters(decoded)
+			&& !decoded.split(/[\\/]/u).includes("..");
+	}
+	catch {
+		return false;
+	}
 }
 
 function defaultPublicSourceFileDirectory() {
@@ -47,7 +81,7 @@ function defaultPublicSourceFileDirectory() {
 export function createSourceAssetStore(options: SourceAssetStoreOptions = {}) {
 	const configuredBaseUrl = (process.env.SOURCE_ASSET_BASE_URL || "").trim();
 	const mode: SourceAssetMode = configuredBaseUrl ? "external-base" : "public-mirror";
-	const baseUrl = configuredBaseUrl ? trimTrailingSlash(configuredBaseUrl) : null;
+	const baseUrl = configuredBaseUrl ? parseSourceAssetBaseUrl(configuredBaseUrl) : null;
 	const publicSourceFileDirectory = options.publicSourceFileDirectory === undefined
 		? defaultPublicSourceFileDirectory()
 		: options.publicSourceFileDirectory;
@@ -57,28 +91,35 @@ export function createSourceAssetStore(options: SourceAssetStoreOptions = {}) {
 		mode,
 		publicSourceFileDirectory,
 		resolve(url: string) {
-			if (!url)
-				return url;
+			const safeUrl = normalizePublicHref(url);
 
-			if (httpProtocolPattern.test(url))
-				return url;
-
-			const normalizedAssetPath = normalizeSourceAssetPath(url);
-
-			if (isPublicSourceFileUrl(url) && !isSafeSourceAssetPath(normalizedAssetPath))
+			if (!safeUrl)
 				return "";
 
-			if (mode === "external-base" && baseUrl)
-				return `${baseUrl}/${normalizedAssetPath}`;
+			if (!isPublicSourceFileUrl(safeUrl))
+				return safeUrl;
 
-			if (isPublicSourceFileUrl(url) && publicSourceFileDirectory) {
-				const assetPath = resolvePath(publicSourceFileDirectory, normalizedAssetPath);
+			const normalizedAssetPath = normalizeSourceAssetPath(safeUrl);
+
+			if (!isSafeSourceAssetPath(normalizedAssetPath))
+				return "";
+
+			if (mode === "external-base" && baseUrl) {
+				const parsed = new URL(safeUrl, "https://ballotclarity.invalid");
+				const assetUrl = new URL(normalizedAssetPath, `${baseUrl}/`);
+				assetUrl.search = parsed.search;
+				assetUrl.hash = parsed.hash;
+				return assetUrl.href;
+			}
+
+			if (publicSourceFileDirectory) {
+				const assetPath = resolvePath(publicSourceFileDirectory, decodeURIComponent(normalizedAssetPath));
 
 				if (!existsSync(assetPath))
 					return "";
 			}
 
-			return url;
+			return safeUrl;
 		}
 	};
 }

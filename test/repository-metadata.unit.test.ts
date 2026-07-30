@@ -42,11 +42,7 @@ test("repository public identity no longer reads as the starter template", () =>
 });
 
 test("repository package descriptions no longer use pre-launch MVP framing", () => {
-	const packages = [
-		readJson("package.json"),
-		readJson("front-end/package.json"),
-		readJson("back-end/package.json"),
-	];
+	const packages = [readJson("package.json"), readJson("front-end/package.json"), readJson("back-end/package.json")];
 
 	for (const pkg of packages) {
 		assert.equal(typeof pkg.description, "string");
@@ -57,14 +53,20 @@ test("repository package descriptions no longer use pre-launch MVP framing", () 
 
 test("repository install-script approvals are explicit and version-scoped", () => {
 	const rootPackage = readJson("package.json");
-	const allowScripts = rootPackage.allowScripts as Record<string, boolean> | undefined;
+	const rootAllowScripts = rootPackage.allowScripts as Record<string, boolean> | undefined;
 
-	assert.deepEqual(allowScripts, {
+	assert.deepEqual(rootAllowScripts, {
 		"@parcel/watcher@2.5.6": true,
-		"esbuild@0.27.7": true,
 		"esbuild@0.28.1": true,
 		"fsevents@2.3.3": true,
-		"puppeteer": false,
-		"unrs-resolver@1.12.2": true,
+		puppeteer: false,
+		"unrs-resolver@1.12.2": true
 	});
+	assert.match(readText(".npmrc"), /^strict-allow-scripts=true$/mu);
+	assert.match(readText("back-end/.npmrc"), /^allow-scripts=esbuild@0\.28\.1,fsevents@2\.3\.3$/mu);
+	assert.match(readText("back-end/.npmrc"), /^strict-allow-scripts=true$/mu);
+	assert.match(
+		rootPackage.scripts["verify:backend-lockfile"],
+		/npm ci --prefix back-end --workspaces=false --include=optional --strict-allow-scripts/u
+	);
 });

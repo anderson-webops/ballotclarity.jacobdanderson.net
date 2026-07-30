@@ -6,11 +6,14 @@ import test from "node:test";
 const contentPage = readFileSync(resolve("src/pages/admin/content.vue"), "utf8");
 const contentHistoryPage = readFileSync(resolve("src/pages/admin/content/[id].vue"), "utf8");
 
-test("admin content publishing exposes reviewer approval controls", () => {
+test("admin content publishing binds reviewer identity to the MFA-protected session", () => {
 	assert.match(contentPage, /Publish approval/);
-	assert.match(contentPage, /v-model="item\.publishApprovedBy"/);
+	assert.doesNotMatch(contentPage, /v-model="item\.publishApprovedBy"/);
+	assert.match(contentPage, /Approved by \{\{ session\?\.displayName \|\| session\?\.username \}\}/);
+	assert.match(contentPage, /canPublish/);
+	assert.match(contentPage, /mfaEnabledAt/);
 	assert.match(contentPage, /v-model="item\.publishApprovalNote"/);
-	assert.match(contentPage, /Unpublishing clears the approval/);
+	assert.match(contentPage, /Unpublishing clears the\s+approval/);
 	assert.match(contentHistoryPage, /Publish approved by/);
 	assert.match(contentHistoryPage, /Publish approval note/);
 });

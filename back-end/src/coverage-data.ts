@@ -2736,8 +2736,10 @@ export const demoAdminOverview: AdminOverviewResponse = {
 		activeAdminCount: 1,
 		activeUserCount: 1,
 		mfaEnabledUserCount: 0,
+		passwordChangeRequiredUserCount: 0,
 		status: "needs_attention",
 		summary: "1 active admin-portal account still needs MFA.",
+		usersRequiringPasswordChange: [],
 		usersWithoutMfa: [
 			{
 				displayName: "Ballot Clarity Admin",

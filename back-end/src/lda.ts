@@ -1,4 +1,6 @@
 import process from "node:process";
+import { readProviderResponseJson, readProviderResponseText } from "./fetch-response.js";
+import { createFetchTimeoutSignal, resolveFetchTimeoutMs } from "./fetch-timeout.js";
 
 export interface LdaContributionItem {
 	amount: number;
@@ -70,12 +72,14 @@ function toNumber(value: number | string | null | undefined) {
 export function createLdaClient({
 	apiKey = process.env.LDA_API_KEY?.trim(),
 	fetchImpl = fetch,
-	timeoutMs = Number(process.env.LDA_FETCH_TIMEOUT_MS || 15000),
+	timeoutMs = resolveFetchTimeoutMs(process.env.LDA_FETCH_TIMEOUT_MS),
 }: LdaClientOptions = {}): LdaClient | null {
 	const resolvedApiKey = apiKey?.trim();
 
 	if (!resolvedApiKey)
 		return null;
+
+	const resolvedTimeoutMs = resolveFetchTimeoutMs(timeoutMs);
 
 	async function fetchContributionPage(query: Record<string, string>) {
 		const requestUrl = new URL("https://lda.senate.gov/api/v1/contributions/");
@@ -90,15 +94,15 @@ export function createLdaClient({
 				Accept: "application/json",
 				Authorization: `Token ${resolvedApiKey}`,
 			},
-			signal: AbortSignal.timeout(timeoutMs),
+			signal: createFetchTimeoutSignal(resolvedTimeoutMs),
 		});
 
 		if (!response.ok) {
-			const detail = await response.text();
+			const detail = await readProviderResponseText(response);
 			throw new Error(`LDA contribution lookup failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ""}`.slice(0, 500));
 		}
 
-		return await response.json() as LdaContributionResponse;
+		return await readProviderResponseJson<LdaContributionResponse>(response);
 	}
 
 	return {

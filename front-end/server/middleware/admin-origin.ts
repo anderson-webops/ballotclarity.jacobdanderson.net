@@ -16,21 +16,14 @@ function configuredSiteOrigin(event: H3Event) {
 		catch {}
 	}
 
+	if (process.env.NODE_ENV === "production")
+		return "";
+
 	return getRequestURL(event).origin;
 }
 
 function requestOrigin(event: H3Event) {
-	const value = getHeader(event, "origin");
-
-	if (!value)
-		return "";
-
-	try {
-		return new URL(value).origin;
-	}
-	catch {
-		return "";
-	}
+	return getHeader(event, "origin") || "";
 }
 
 export default defineEventHandler((event) => {

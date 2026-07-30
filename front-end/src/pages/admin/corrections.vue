@@ -7,16 +7,29 @@ definePageMeta({
 	middleware: "admin"
 });
 
-const [{ data, refresh }, { data: contentData }] = await Promise.all([
+const [{ data: session }, { data, refresh }, { data: contentData }] = await Promise.all([
+	useAdminSession("admin-corrections-session"),
 	useAdminCorrections(),
 	useAdminContent()
 ]);
 const statusOptions: AdminCorrectionStatus[] = ["new", "triaged", "researching", "resolved"];
 const priorityOptions: AdminPriority[] = ["high", "medium", "low"];
+const canManagePublicCorrections = computed(() => session.value?.role === "admin" && Boolean(session.value.mfaEnabledAt));
 const contentOptions = computed(() => [...(contentData.value?.items ?? [])].sort((left, right) => left.title.localeCompare(right.title)));
 const savingId = ref<string | null>(null);
 const feedbackMessage = ref("");
 const feedbackTone = ref<"error" | "success">("success");
+
+function canEditCorrection(item: { status: AdminCorrectionStatus }) {
+	return item.status === "new" || canManagePublicCorrections.value;
+}
+
+function availableStatusOptions(item: { status: AdminCorrectionStatus }) {
+	if (canManagePublicCorrections.value)
+		return statusOptions;
+
+	return item.status === "new" ? ["new"] : [item.status];
+}
 
 async function saveCorrection(id: string, payload: {
 	contentId?: string | null;
@@ -68,6 +81,10 @@ usePageSeo({
 				Reader and internal reports stay visible here from submission through resolution. The goal is traceability, not silent edits.
 			</p>
 		</header>
+
+		<InfoCallout v-if="!canManagePublicCorrections" title="Public correction approval" tone="warning">
+			New submissions remain private while they are reviewed. An admin with multi-factor authentication must promote a record out of the new state before it appears publicly, and must approve any later public change or removal.
+		</InfoCallout>
 
 		<p
 			v-if="feedbackMessage"
@@ -169,9 +186,10 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Status</span>
 							<select
 								v-model="item.status"
+								:disabled="!canEditCorrection(item)"
 								class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							>
-								<option v-for="status in statusOptions" :key="status" :value="status">
+								<option v-for="status in availableStatusOptions(item)" :key="status" :value="status">
 									{{ status }}
 								</option>
 							</select>
@@ -180,6 +198,7 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Priority</span>
 							<select
 								v-model="item.priority"
+								:disabled="!canEditCorrection(item)"
 								class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							>
 								<option v-for="priority in priorityOptions" :key="priority" :value="priority">
@@ -191,6 +210,7 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Next step</span>
 							<textarea
 								v-model="item.nextStep"
+								:disabled="!canEditCorrection(item)"
 								rows="4"
 								class="text-sm text-app-ink mt-2 px-4 py-3 border border-app-line rounded-2xl bg-white min-h-28 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							/>
@@ -199,6 +219,7 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Link to content record</span>
 							<select
 								v-model="item.contentId"
+								:disabled="!canEditCorrection(item)"
 								class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							>
 								<option value="">
@@ -209,7 +230,7 @@ usePageSeo({
 								</option>
 							</select>
 						</label>
-						<button type="submit" class="btn-primary w-full" :disabled="savingId === item.id">
+						<button type="submit" class="btn-primary w-full" :disabled="!canEditCorrection(item) || savingId === item.id">
 							{{ savingId === item.id ? "Saving..." : "Save correction" }}
 						</button>
 					</form>

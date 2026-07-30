@@ -7,6 +7,7 @@ interface PublicRequestThrottleState {
 
 export interface PublicRequestThrottleResult {
 	allowed: boolean;
+	capacityLimited: boolean;
 	retryAfterSeconds: number;
 }
 
@@ -16,9 +17,13 @@ export interface PublicRequestThrottle {
 
 interface PublicRequestThrottleOptions {
 	fallbackMaxRequests?: number;
+	fallbackMaxBuckets?: number;
 	fallbackWindowMs?: number;
+	maxBuckets?: number;
+	maxBucketsEnvName?: string;
 	maxRequests?: number;
 	maxRequestsEnvName?: string;
+	now?: () => number;
 	windowMs?: number;
 	windowMsEnvName?: string;
 }
@@ -28,43 +33,82 @@ function getNumberEnv(name: string | undefined, fallback: number) {
 		return fallback;
 
 	const raw = Number(process.env[name]);
-	return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+	return Number.isSafeInteger(raw) && raw > 0 ? raw : fallback;
+}
+
+function requirePositiveInteger(value: number, name: string) {
+	if (!Number.isSafeInteger(value) || value <= 0)
+		throw new TypeError(`${name} must be a positive integer.`);
+
+	return value;
 }
 
 function normalizeThrottleKey(key: string) {
-	return key.trim().toLowerCase() || "unknown";
+	return key.trim().toLowerCase().slice(0, 128) || "unknown";
 }
 
 export function createPublicRequestThrottle(options: PublicRequestThrottleOptions = {}): PublicRequestThrottle {
 	const attempts = new Map<string, PublicRequestThrottleState>();
 	const fallbackWindowMs = options.fallbackWindowMs ?? 10 * 60 * 1000;
 	const fallbackMaxRequests = options.fallbackMaxRequests ?? 5;
-	const windowMs = options.windowMs ?? getNumberEnv(options.windowMsEnvName, fallbackWindowMs);
-	const maxRequests = options.maxRequests ?? getNumberEnv(options.maxRequestsEnvName, fallbackMaxRequests);
+	const fallbackMaxBuckets = options.fallbackMaxBuckets ?? 10_000;
+	const windowMs = requirePositiveInteger(
+		options.windowMs ?? getNumberEnv(options.windowMsEnvName, fallbackWindowMs),
+		"windowMs",
+	);
+	const maxRequests = requirePositiveInteger(
+		options.maxRequests ?? getNumberEnv(options.maxRequestsEnvName, fallbackMaxRequests),
+		"maxRequests",
+	);
+	const maxBuckets = requirePositiveInteger(
+		options.maxBuckets ?? getNumberEnv(options.maxBucketsEnvName, fallbackMaxBuckets),
+		"maxBuckets",
+	);
+	const now = options.now ?? Date.now;
 
-	function prune(now: number) {
+	function prune(currentTime: number) {
 		for (const [key, state] of attempts.entries()) {
-			if (state.resetAt <= now)
+			if (state.resetAt <= currentTime)
 				attempts.delete(key);
 		}
 	}
 
+	function getCapacityRetryAfterSeconds(currentTime: number) {
+		let earliestResetAt = Number.POSITIVE_INFINITY;
+
+		for (const state of attempts.values())
+			earliestResetAt = Math.min(earliestResetAt, state.resetAt);
+
+		return Number.isFinite(earliestResetAt)
+			? Math.max(1, Math.ceil((earliestResetAt - currentTime) / 1000))
+			: Math.max(1, Math.ceil(windowMs / 1000));
+	}
+
 	return {
 		attempt(key: string) {
-			const now = Date.now();
-			prune(now);
+			const currentTime = now();
+			prune(currentTime);
 
 			const normalizedKey = normalizeThrottleKey(key);
 			const current = attempts.get(normalizedKey);
 
-			if (!current || current.resetAt <= now) {
+			if (!current || current.resetAt <= currentTime) {
+				if (!current && attempts.size >= maxBuckets) {
+					return {
+						allowed: false,
+						capacityLimited: true,
+						retryAfterSeconds: getCapacityRetryAfterSeconds(currentTime)
+					};
+				}
+
 				attempts.set(normalizedKey, {
 					count: 1,
-					resetAt: now + windowMs
+					resetAt: currentTime + windowMs
 				});
 
 				return {
 					allowed: true,
+					capacityLimited: false,
 					retryAfterSeconds: 0
 				};
 			}
@@ -72,7 +116,8 @@ export function createPublicRequestThrottle(options: PublicRequestThrottleOption
 			if (current.count >= maxRequests) {
 				return {
 					allowed: false,
-					retryAfterSeconds: Math.max(1, Math.ceil((current.resetAt - now) / 1000))
+					capacityLimited: false,
+					retryAfterSeconds: Math.max(1, Math.ceil((current.resetAt - currentTime) / 1000))
 				};
 			}
 
@@ -81,6 +126,7 @@ export function createPublicRequestThrottle(options: PublicRequestThrottleOption
 
 			return {
 				allowed: true,
+				capacityLimited: false,
 				retryAfterSeconds: 0
 			};
 		}

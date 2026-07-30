@@ -1,3 +1,5 @@
+import { defaultRequestTimeoutMs } from "./request-timeout";
+
 export const contactAddressEndpoint = "/api/contact-address";
 export const contactAddressNonceCookieName = "ballot_clarity_contact_nonce";
 export const contactAddressNonceHeaderName = "x-ballot-clarity-contact-nonce";
@@ -44,7 +46,8 @@ async function fetchContactAddress(fetcher: ContactAddressFetcher, nonce: string
 	const response = await fetcher(contactAddressEndpoint, {
 		cache: "no-store",
 		credentials: "same-origin",
-		headers
+		headers,
+		signal: AbortSignal.timeout(defaultRequestTimeoutMs)
 	});
 
 	if (!response.ok)

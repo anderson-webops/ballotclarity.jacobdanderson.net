@@ -11,6 +11,10 @@ import {
 	writeCoverageSnapshotMetadata,
 } from "../src/coverage-repository.js";
 import {
+	buildFultonOfficialLogisticsOnlySnapshot,
+	buildFultonReviewedCoverageSnapshotMetadata,
+} from "../src/fulton-reviewed-coverage.js";
+import {
 	backupSnapshot,
 	listBackups,
 	promoteSnapshot,
@@ -79,26 +83,24 @@ test("promote and rollback preserve backup snapshots and sidecar metadata", () =
 			status: "seed"
 		}, activeSnapshotPath);
 
-		writeCoverageSnapshot(buildSeedCoverageSnapshot(), reviewedCandidatePath);
-		writeCoverageSnapshotMetadata({
+		writeCoverageSnapshot(buildFultonOfficialLogisticsOnlySnapshot(), reviewedCandidatePath);
+		writeCoverageSnapshotMetadata(buildFultonReviewedCoverageSnapshotMetadata({
 			importedAt: "2026-04-20T12:00:00.000Z",
 			note: "Reviewed candidate snapshot.",
 			reviewedAt: "2026-04-21T12:00:00.000Z",
 			sourceLabel: "Reviewed Fulton snapshot",
-			sourceType: "imported",
 			status: "reviewed"
-		}, reviewedCandidatePath);
+		}), reviewedCandidatePath);
 
-		writeCoverageSnapshot(buildSeedCoverageSnapshot(), approvedCandidatePath);
-		writeCoverageSnapshotMetadata({
+		writeCoverageSnapshot(buildFultonOfficialLogisticsOnlySnapshot(), approvedCandidatePath);
+		writeCoverageSnapshotMetadata(buildFultonReviewedCoverageSnapshotMetadata({
 			approvedAt: "2026-04-22T12:00:00.000Z",
 			importedAt: "2026-04-22T10:00:00.000Z",
 			note: "Production-approved candidate snapshot.",
 			reviewedAt: "2026-04-22T11:00:00.000Z",
 			sourceLabel: "Approved Fulton snapshot",
-			sourceType: "imported",
 			status: "production_approved"
-		}, approvedCandidatePath);
+		}), approvedCandidatePath);
 
 		const firstBackup = backupSnapshot(activeSnapshotPath);
 		assert.ok(firstBackup);
@@ -129,19 +131,49 @@ test("runManageCoverageCommand reads flag values from the provided argv", () => 
 		const activeSnapshotPath = join(workspace.root, "active.json");
 		const candidatePath = join(workspace.root, "candidate.json");
 
-		writeCoverageSnapshot(buildSeedCoverageSnapshot(), candidatePath);
-		writeCoverageSnapshotMetadata({
+		writeCoverageSnapshot(buildFultonOfficialLogisticsOnlySnapshot(), candidatePath);
+		writeCoverageSnapshotMetadata(buildFultonReviewedCoverageSnapshotMetadata({
 			importedAt: "2026-04-20T12:00:00.000Z",
 			note: "Reviewed candidate snapshot.",
 			reviewedAt: "2026-04-21T12:00:00.000Z",
 			sourceLabel: "Reviewed Fulton snapshot",
-			sourceType: "imported",
 			status: "reviewed"
-		}, candidatePath);
+		}), candidatePath);
 
 		runManageCoverageCommand(["promote", "--from", candidatePath, "--target", activeSnapshotPath]);
 
 		assert.equal(readCoverageSnapshotMetadata(activeSnapshotPath).status, "reviewed");
+	}
+	finally {
+		workspace.dispose();
+	}
+});
+
+test("promotion rejects staged content carrying reviewed metadata without changing the active pair", () => {
+	const workspace = createWorkspace();
+
+	try {
+		const activeSnapshotPath = join(workspace.root, "active.json");
+		const invalidCandidatePath = join(workspace.root, "invalid-reviewed.json");
+
+		writeCoverageSnapshot(buildFultonOfficialLogisticsOnlySnapshot(), activeSnapshotPath);
+		writeCoverageSnapshotMetadata(buildFultonReviewedCoverageSnapshotMetadata({
+			importedAt: "2026-04-20T12:00:00.000Z",
+			reviewedAt: "2026-04-20T12:00:00.000Z",
+			status: "reviewed"
+		}), activeSnapshotPath);
+		writeCoverageSnapshot(buildSeedCoverageSnapshot(), invalidCandidatePath);
+		writeCoverageSnapshotMetadata(buildFultonReviewedCoverageSnapshotMetadata({
+			importedAt: "2026-04-21T12:00:00.000Z",
+			reviewedAt: "2026-04-21T12:00:00.000Z",
+			status: "reviewed"
+		}), invalidCandidatePath);
+
+		assert.throws(
+			() => promoteSnapshot(invalidCandidatePath, activeSnapshotPath),
+			/publication validation/i
+		);
+		assert.equal(readCoverageSnapshotMetadata(activeSnapshotPath).importedAt, "2026-04-20T12:00:00.000Z");
 	}
 	finally {
 		workspace.dispose();

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	createAddressCacheRepository,
+	defaultAddressCacheMaxRows,
 	hashAddressCacheInput,
 	normalizeAddressCacheInput,
+	resolveAddressCacheMaxRows,
 } from "../src/address-cache-repository.js";
 
 const encryptionKey = "test-address-cache-encryption-key-that-is-long-enough";
@@ -30,6 +32,14 @@ test("address cache input hashing is keyed and keeps distinct lookup inputs dist
 	);
 	assert.match(hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303", encryptionKey), /^[a-f0-9]{64}$/u);
 	assert.throws(() => hashAddressCacheInput("55 Trinity Ave SW, Atlanta, GA 30303", ""));
+});
+
+test("address cache row ceiling accepts only positive safe integers", () => {
+	assert.equal(resolveAddressCacheMaxRows("50000"), 50_000);
+	assert.equal(resolveAddressCacheMaxRows(250.9), 250);
+	assert.equal(resolveAddressCacheMaxRows("0"), defaultAddressCacheMaxRows);
+	assert.equal(resolveAddressCacheMaxRows("unbounded"), defaultAddressCacheMaxRows);
+	assert.equal(resolveAddressCacheMaxRows(Number.MAX_SAFE_INTEGER + 1), defaultAddressCacheMaxRows);
 });
 
 test("address cache repository safely disables persistence without both database and encryption configuration", async () => {

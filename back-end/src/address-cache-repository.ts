@@ -26,6 +26,7 @@ const sourceSchemaPath = new URL("../live-data-schema.sql", import.meta.url);
 const addressCacheEncryptionPurpose = "ballot-clarity:address-cache:v1";
 const addressCacheHashPurpose = "ballot-clarity:address-cache-input:v1";
 const addressCacheRetentionMs = 7 * 24 * 60 * 60 * 1000;
+export const defaultAddressCacheMaxRows = 100_000;
 
 export function normalizeAddressCacheInput(input: string) {
 	return input.trim().replace(/\s+/g, " ").toLowerCase();
@@ -38,6 +39,18 @@ export function hashAddressCacheInput(input: string, secret: string) {
 	return createHmac("sha256", secret)
 		.update(`${addressCacheHashPurpose}\0${normalizeAddressCacheInput(input)}`)
 		.digest("hex");
+}
+
+export function resolveAddressCacheMaxRows(
+	value: number | string | null | undefined = process.env.ADDRESS_CACHE_MAX_ROWS,
+	fallback = defaultAddressCacheMaxRows,
+) {
+	const parsed = typeof value === "number" ? value : Number(value);
+	const normalized = Math.floor(parsed);
+
+	return Number.isSafeInteger(normalized) && normalized > 0
+		? normalized
+		: fallback;
 }
 
 function resolveSchemaPath() {
@@ -75,7 +88,11 @@ function mapCachedLookup(row: AddressLookupRow, encryptionKey: string): CachedAd
 	};
 }
 
-async function createPostgresAddressCacheRepository(databaseUrl: string, encryptionKey: string): Promise<AddressCacheRepository> {
+async function createPostgresAddressCacheRepository(
+	databaseUrl: string,
+	encryptionKey: string,
+	maxRows: number,
+): Promise<AddressCacheRepository> {
 	const pool = new Pool({
 		connectionString: databaseUrl
 	});
@@ -89,6 +106,7 @@ async function createPostgresAddressCacheRepository(databaseUrl: string, encrypt
 		DELETE FROM address_lookups
 		WHERE encrypted_payload IS NULL OR expires_at IS NULL;
 		CREATE INDEX IF NOT EXISTS idx_address_lookups_expires_at ON address_lookups(expires_at);
+		CREATE INDEX IF NOT EXISTS idx_address_lookups_updated_at ON address_lookups(updated_at DESC);
 	`);
 
 	return {
@@ -147,13 +165,23 @@ async function createPostgresAddressCacheRepository(databaseUrl: string, encrypt
 					census_vintage = NULL,
 					updated_at = NOW()
 			`, [inputHash, encryptedPayload, addressCacheRetentionMs]);
+			await pool.query(`
+				DELETE FROM address_lookups
+				WHERE id IN (
+					SELECT id
+					FROM address_lookups
+					ORDER BY updated_at DESC, id DESC
+					OFFSET $1
+				)
+			`, [maxRows]);
 		}
 	};
 }
 
 export async function createAddressCacheRepository(
 	databaseUrl = process.env.ADMIN_DATABASE_URL || process.env.DATABASE_URL || "",
-	encryptionKey = process.env.ADDRESS_CACHE_ENCRYPTION_KEY || ""
+	encryptionKey = process.env.ADDRESS_CACHE_ENCRYPTION_KEY || "",
+	maxRows = resolveAddressCacheMaxRows(),
 ): Promise<AddressCacheRepository> {
 	const resolvedDatabaseUrl = databaseUrl.trim();
 	const resolvedEncryptionKey = encryptionKey.trim();
@@ -168,5 +196,9 @@ export async function createAddressCacheRepository(
 		};
 	}
 
-	return await createPostgresAddressCacheRepository(resolvedDatabaseUrl, resolvedEncryptionKey);
+	return await createPostgresAddressCacheRepository(
+		resolvedDatabaseUrl,
+		resolvedEncryptionKey,
+		resolveAddressCacheMaxRows(maxRows),
+	);
 }

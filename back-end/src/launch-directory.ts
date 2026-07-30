@@ -3,6 +3,8 @@ import type { OpenStatesClient, OpenStatesRepresentativeRecord } from "./opensta
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
+import { readProviderResponseJson, readProviderResponseText } from "./fetch-response.js";
+import { createFetchTimeoutSignal, resolveFetchTimeoutMs } from "./fetch-timeout.js";
 import { fetchGoogleCivic, shouldForceGoogleCivicIpv4 } from "./google-civic.js";
 import { launchTargetProfile } from "./launch-profile.js";
 
@@ -58,6 +60,7 @@ interface BuildLaunchDirectorySnapshotOptions {
 	congressClient?: CongressClient | null;
 	fetchImpl?: typeof fetch;
 	googleCivicApiKey?: string;
+	googleCivicTimeoutMs?: number;
 	launchLatitude?: number;
 	launchLongitude?: number;
 	openStatesClient?: OpenStatesClient | null;
@@ -80,7 +83,8 @@ function createSkippedStatus(detail: string): LaunchDirectoryProviderStatus {
 
 async function fetchUpcomingElections(
 	googleCivicApiKey: string | undefined,
-	fetchImpl: typeof fetch
+	fetchImpl: typeof fetch,
+	timeoutMs: number
 ) {
 	if (!googleCivicApiKey) {
 		return {
@@ -93,16 +97,18 @@ async function fetchUpcomingElections(
 	requestUrl.searchParams.set("key", googleCivicApiKey);
 	let response = await fetchGoogleCivic(requestUrl, {
 		fetchImpl,
-		forceIPv4: shouldForceGoogleCivicIpv4()
+		forceIPv4: shouldForceGoogleCivicIpv4(),
+		signal: createFetchTimeoutSignal(timeoutMs)
 	});
 
 	if (!response.ok && response.status === 403) {
-		const firstBody = await response.text();
+		const firstBody = await readProviderResponseText(response);
 
 		if (googleCivicIpRestrictionPattern.test(firstBody) && fetchImpl === fetch) {
 			response = await fetchGoogleCivic(requestUrl, {
 				fetchImpl,
-				forceIPv4: true
+				forceIPv4: true,
+				signal: createFetchTimeoutSignal(timeoutMs)
 			});
 		}
 		else {
@@ -111,12 +117,12 @@ async function fetchUpcomingElections(
 	}
 
 	if (!response.ok) {
-		const detail = await response.text();
+		const detail = await readProviderResponseText(response);
 
 		throw new Error(`Google Civic elections lookup failed: ${response.status} ${detail}`.slice(0, 500));
 	}
 
-	const payload = await response.json() as GoogleCivicElectionsResponse;
+	const payload = await readProviderResponseJson<GoogleCivicElectionsResponse>(response);
 	const items = (payload.elections ?? [])
 		.filter(item => item.ocdDivisionId?.includes("/state:ga"))
 		.map(item => ({
@@ -203,13 +209,14 @@ export async function buildLaunchDirectorySnapshot({
 	congressClient = null,
 	fetchImpl = fetch,
 	googleCivicApiKey = process.env.GOOGLE_CIVIC_API_KEY?.trim(),
+	googleCivicTimeoutMs = resolveFetchTimeoutMs(process.env.GOOGLE_CIVIC_FETCH_TIMEOUT_MS),
 	launchLatitude = Number(process.env.LAUNCH_PROFILE_LATITUDE || 33.7490),
 	launchLongitude = Number(process.env.LAUNCH_PROFILE_LONGITUDE || -84.3880),
 	openStatesClient = null
 }: BuildLaunchDirectorySnapshotOptions = {}): Promise<LaunchDirectorySnapshot> {
 	const updatedAt = new Date().toISOString();
 	const [googleCivic, federalRepresentatives, openStates] = await Promise.all([
-		fetchUpcomingElections(googleCivicApiKey, fetchImpl),
+		fetchUpcomingElections(googleCivicApiKey, fetchImpl, resolveFetchTimeoutMs(googleCivicTimeoutMs)),
 		congressClient
 			? congressClient.listMembersByState("GA")
 			: Promise.resolve([] as CongressMemberRecord[]),

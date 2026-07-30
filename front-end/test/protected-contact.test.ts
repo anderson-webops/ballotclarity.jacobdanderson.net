@@ -28,6 +28,7 @@ test("protected contact request retries after the endpoint issues a nonce challe
 	const requests: Array<{ headers: HeadersInit | undefined; url: RequestInfo | URL }> = [];
 	const fetcher = async (url: RequestInfo | URL, init?: RequestInit) => {
 		requests.push({ headers: init?.headers, url });
+		assert.ok(init?.signal instanceof AbortSignal);
 
 		if (!currentCookie) {
 			currentCookie = "ballot_clarity_contact_nonce=nonce-value";
@@ -68,4 +69,10 @@ test("protected contact source avoids static email exposure and hydrates through
 	assert.equal(endpointUtilitySource.includes("hello@ballotclarity.org"), false);
 	assert.equal(componentSource.includes("onMounted"), true);
 	assert.equal(utilitySource.includes(contactAddressEndpoint), true);
+	assert.match(endpointUtilitySource, /process\.env\.NODE_ENV === "production"/);
+	assert.match(endpointUtilitySource, /normalizedSecret\.length < 32/);
+	assert.doesNotMatch(endpointUtilitySource, /ADMIN_SESSION_SECRET/);
+	assert.match(endpointUtilitySource, /sameSite: "strict"/);
+	assert.match(endpointUtilitySource, /getExpectedRequestOrigin/);
+	assert.match(endpointUtilitySource, /CONTACT_ADDRESS_RATE_LIMIT_MAX_BUCKETS/);
 });

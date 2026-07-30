@@ -36,6 +36,7 @@ const canSubmit = computed(() => Boolean(
 	&& form.confirmPassword
 ));
 const mfaEnabled = computed(() => Boolean(session.value?.mfaEnabledAt));
+const passwordChangeRequired = computed(() => Boolean(session.value?.passwordChangeRequiredAt));
 
 function extractErrorMessage(error: unknown, fallback: string) {
 	return error instanceof FetchError
@@ -55,6 +56,7 @@ async function changePassword() {
 	isSubmitting.value = true;
 
 	try {
+		const wasRequired = passwordChangeRequired.value;
 		const updatedSession = await $fetch<AdminSessionResponse>("/api/admin/session/password", {
 			body: {
 				currentPassword: form.currentPassword,
@@ -67,7 +69,9 @@ async function changePassword() {
 		form.confirmPassword = "";
 		form.currentPassword = "";
 		form.newPassword = "";
-		feedbackMessage.value = "Password changed. Other sessions for this account were invalidated.";
+		feedbackMessage.value = wasRequired
+			? "Temporary password replaced. The full admin workspace is now available."
+			: "Password changed. Other sessions for this account were invalidated.";
 		feedbackTone.value = "success";
 		await refresh();
 	}
@@ -193,6 +197,10 @@ usePageSeo({
 			</p>
 		</section>
 
+		<InfoCallout v-if="passwordChangeRequired" title="Password change required" tone="warning" class="mt-6">
+			This account is using an administrator-issued temporary password. Replace it below before using any other admin workflow.
+		</InfoCallout>
+
 		<div class="mt-6 gap-6 grid lg:grid-cols-[minmax(0,0.95fr)_minmax(22rem,0.65fr)] lg:items-start">
 			<div class="space-y-6">
 				<section class="surface-panel">
@@ -253,7 +261,7 @@ usePageSeo({
 					</form>
 				</section>
 
-				<section class="surface-panel">
+				<section v-if="!passwordChangeRequired" class="surface-panel">
 					<div class="flex flex-wrap gap-2 items-center">
 						<TrustBadge label="Multi-factor authentication" tone="accent" />
 						<TrustBadge :label="mfaEnabled ? 'enabled' : 'not enabled'" :tone="mfaEnabled ? 'neutral' : 'warning'" />
@@ -368,6 +376,7 @@ usePageSeo({
 						{{ session?.mfaEnabledAt ? "Enabled" : "Not enabled" }}
 					</p>
 					<UpdatedAt v-if="session?.credentialsUpdatedAt" :value="session.credentialsUpdatedAt" label="Credentials" />
+					<UpdatedAt v-if="session?.passwordChangeRequiredAt" :value="session.passwordChangeRequiredAt" label="Temporary password issued" />
 					<UpdatedAt v-if="session?.mfaEnabledAt" :value="session.mfaEnabledAt" label="MFA enabled" />
 				</div>
 				<InfoCallout title="Session invalidation" class="mt-6">

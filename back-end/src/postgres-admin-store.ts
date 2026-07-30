@@ -49,12 +49,20 @@ import {
 	getLegacyDemoAdminIds,
 	hashPassword,
 	nextAdminCredentialTimestamp,
+	normalizeAdminDisplayName,
 	normalizeAdminPassword,
+	normalizeAdminUsername,
 	parseContentHistoryRow,
 	parseContentSnapshot,
 	resolveContentLookupFromPageUrl,
 	shouldPurgeLegacyDemoAdminData,
 	snapshotToContentUpdateValues,
+	validateAdminUserRole,
+	validateContentPatch,
+	validateContentSnapshotForPersistence,
+	validateCorrectionPatch,
+	validateGuidePackagePersistenceState,
+	validateSourcePatch,
 	verifyPassword
 } from "./admin-store.js";
 import { normalizeCorrectionSubmission } from "./feedback-submission.js";
@@ -74,11 +82,12 @@ interface UserRow {
 	last_login_at: string | null;
 	mfa_enabled_at: string | null;
 	mfa_secret: string | null;
+	password_change_required_at: string | null;
 	password_hash: string;
 	updated_at: string;
 }
 
-const adminUserSelectColumns = "id, username, display_name, role, created_at, credentials_updated_at, disabled_at, last_login_at, mfa_secret, mfa_enabled_at, password_hash, updated_at";
+const adminUserSelectColumns = "id, username, display_name, role, created_at, credentials_updated_at, disabled_at, last_login_at, mfa_secret, mfa_enabled_at, password_change_required_at, password_hash, updated_at";
 
 interface ContentRow {
 	id: string;
@@ -204,6 +213,7 @@ function rowToUser(row: UserRow): AdminUser {
 		id: row.id,
 		lastLoginAt: row.last_login_at || undefined,
 		mfaEnabledAt: row.mfa_enabled_at || undefined,
+		passwordChangeRequiredAt: row.password_change_required_at || undefined,
 		role: row.role,
 		username: row.username
 	};
@@ -430,6 +440,7 @@ async function seedPostgresDatabase(pool: Pool, options: AdminRepositoryOptions)
 	await pool.query(schema);
 	await pool.query("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS credentials_updated_at TEXT");
 	await pool.query("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS disabled_at TEXT");
+	await pool.query("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS password_change_required_at TEXT");
 	await pool.query("ALTER TABLE admin_content ADD COLUMN IF NOT EXISTS public_summary TEXT");
 	await pool.query("ALTER TABLE admin_content ADD COLUMN IF NOT EXISTS ballot_summary TEXT");
 	await pool.query("ALTER TABLE admin_content ADD COLUMN IF NOT EXISTS publish_approved_by TEXT");
@@ -677,19 +688,25 @@ async function seedPostgresDatabase(pool: Pool, options: AdminRepositoryOptions)
 
 	if (!usersCount && bootstrapUsername && bootstrapPassword) {
 		const now = new Date().toISOString();
+		const normalizedBootstrapUsername = normalizeAdminUsername(bootstrapUsername);
+		const normalizedBootstrapDisplayName = normalizeAdminDisplayName(bootstrapDisplayName);
+		const normalizedBootstrapPassword = normalizeAdminPassword(bootstrapPassword);
+
+		validateAdminUserRole(bootstrapRole);
 
 		await pool.query(`
 			INSERT INTO admin_users (
-				id, username, display_name, role, password_hash, created_at, credentials_updated_at, mfa_secret, mfa_enabled_at, updated_at, disabled_at, last_login_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				id, username, display_name, role, password_hash, created_at, credentials_updated_at, mfa_secret, mfa_enabled_at, password_change_required_at, updated_at, disabled_at, last_login_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		`, [
-			`user-${bootstrapUsername}`,
-			bootstrapUsername.trim(),
-			bootstrapDisplayName,
+			`user-${normalizedBootstrapUsername}`,
+			normalizedBootstrapUsername,
+			normalizedBootstrapDisplayName,
 			bootstrapRole,
-			hashPassword(bootstrapPassword),
+			hashPassword(normalizedBootstrapPassword),
 			now,
 			now,
+			null,
 			null,
 			null,
 			now,
@@ -823,12 +840,6 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 		]);
 	}
 
-	async function recordAuditEvent(input: AuditEventInput) {
-		await runTransaction(async (client) => {
-			await appendAuditEvent(client, input);
-		});
-	}
-
 	async function buildAuditEventResponse(): Promise<AdminAuditResponse> {
 		const result = await pool.query<AuditRow>(`
 			SELECT id, sequence, timestamp, event_type, actor_username, actor_display_name, actor_role, target_type, target_id, target_label, summary, metadata, previous_hash, event_hash
@@ -846,23 +857,46 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 		};
 	}
 
-	async function getContentRow(id: string) {
-		const result = await pool.query<ContentRow>(`
-				SELECT id, title, entity_type, entity_slug, status, priority, updated_at, assigned_to, blocker, summary, public_summary, ballot_summary, source_coverage, published, published_at, publish_approved_by, publish_approved_at, publish_approval_note
-				FROM admin_content
-				WHERE id = $1
+	async function getContentRow(
+		id: string,
+		executor: Pool | PoolClient = pool,
+		lockForUpdate = false
+	) {
+		const result = await executor.query<ContentRow>(`
+					SELECT id, title, entity_type, entity_slug, status, priority, updated_at, assigned_to, blocker, summary, public_summary, ballot_summary, source_coverage, published, published_at, publish_approved_by, publish_approved_at, publish_approval_note
+					FROM admin_content
+					WHERE id = $1
+					${lockForUpdate ? "FOR UPDATE" : ""}
+			`, [id]);
+
+		return result.rows[0];
+	}
+
+	async function getGuidePackageRow(
+		id: string,
+		executor: Pool | PoolClient = pool,
+		lockForUpdate = false
+	) {
+		const result = await executor.query<GuidePackageRow>(`
+			SELECT id, election_slug, jurisdiction_slug, status, reviewer, review_notes, review_recommendation, coverage_notes, coverage_limits, created_at, drafted_at, reviewed_at, published_at, updated_at
+			FROM admin_guide_packages
+			WHERE id = $1
+			${lockForUpdate ? "FOR UPDATE" : ""}
 		`, [id]);
 
 		return result.rows[0];
 	}
 
-	async function resolveContentIdForPageUrl(pageUrl: string | undefined) {
+	async function resolveContentIdForPageUrl(
+		pageUrl: string | undefined,
+		executor: Pool | PoolClient = pool
+	) {
 		const lookup = resolveContentLookupFromPageUrl(pageUrl);
 
 		if (!lookup)
 			return null;
 
-		const result = await pool.query<{ id: string }>(`
+		const result = await executor.query<{ id: string }>(`
 				SELECT id
 				FROM admin_content
 				WHERE entity_type = $1 AND entity_slug = $2
@@ -871,7 +905,10 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 		return result.rows[0]?.id ?? null;
 	}
 
-	async function resolvePatchContentId(contentId: string | null | undefined) {
+	async function resolvePatchContentId(
+		contentId: string | null | undefined,
+		executor: Pool | PoolClient = pool
+	) {
 		if (contentId === null)
 			return null;
 
@@ -880,7 +917,7 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 		if (!normalized)
 			return null;
 
-		const result = await pool.query<{ id: string }>(`
+		const result = await executor.query<{ id: string }>(`
 				SELECT id
 				FROM admin_content
 				WHERE id = $1
@@ -900,9 +937,10 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 		changedFields: string[],
 		previous: AdminContentSnapshot,
 		next: AdminContentSnapshot,
-		summary: string
+		summary: string,
+		executor: Pool | PoolClient = pool
 	) {
-		await pool.query(`
+		await executor.query(`
 			INSERT INTO admin_content_history (
 				id,
 				content_id,
@@ -956,47 +994,50 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 			const summary = submission.sourceLinks
 				? `${message}\n\nSupporting links:\n${submission.sourceLinks}`
 				: message;
-			const contentId = await resolveContentIdForPageUrl(submission.pageUrl);
 
-			await pool.query(`
+			await runTransaction(async (client) => {
+				const contentId = await resolveContentIdForPageUrl(submission.pageUrl, client);
+
+				await client.query(`
 					INSERT INTO admin_corrections (
 						id, submission_type, subject, entity_type, entity_label, status, priority, submitted_at,
 						reported_by, summary, next_step, source_count, page_url, content_id
 					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 				`, [
-				id,
-				submission.submissionType,
-				subject,
-				"policy",
-				submission.pageUrl || "General site feedback",
-				"new",
-				submission.submissionType === "correction" ? "high" : "medium",
-				now,
-				reportedBy,
-				summary,
-				submission.submissionType === "correction"
-					? "Verify the cited claim, source trail, and page framing."
-					: "Triage the feedback and determine whether it belongs in product, content, or operations review.",
-				submission.sourceLinks?.split("\n").length ?? 0,
-				submission.pageUrl || null,
-				contentId
-			]);
+					id,
+					submission.submissionType,
+					subject,
+					"policy",
+					submission.pageUrl || "General site feedback",
+					"new",
+					submission.submissionType === "correction" ? "high" : "medium",
+					now,
+					reportedBy,
+					summary,
+					submission.submissionType === "correction"
+						? "Verify the cited claim, source trail, and page framing."
+						: "Triage the feedback and determine whether it belongs in product, content, or operations review.",
+					submission.sourceLinks?.split("\n").length ?? 0,
+					submission.pageUrl || null,
+					contentId
+				]);
 
-			await logActivity(
-				"correction",
-				submission.submissionType === "correction" ? "Received correction submission" : "Received public feedback",
-				`${subject} was submitted through the public contact form.`
-			);
+				await logActivity(
+					"correction",
+					submission.submissionType === "correction" ? "Received correction submission" : "Received public feedback",
+					`${subject} was submitted through the public contact form.`,
+					client
+				);
+			});
 
 			return { ok: true, submittedAt: now };
 		},
 		async createUser(input) {
-			const username = input.username.trim().toLowerCase();
-			const displayName = input.displayName.trim();
+			const username = normalizeAdminUsername(input.username);
+			const displayName = normalizeAdminDisplayName(input.displayName);
 			const password = normalizeAdminPassword(input.password);
 
-			if (!username || !displayName)
-				throw new Error("Display name, username, role, and password are required.");
+			validateAdminUserRole(input.role);
 
 			const now = new Date().toISOString();
 			const id = `user-${randomUUID()}`;
@@ -1014,8 +1055,8 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 
 				await client.query(`
 					INSERT INTO admin_users (
-						id, username, display_name, role, password_hash, created_at, credentials_updated_at, mfa_secret, mfa_enabled_at, updated_at, disabled_at, last_login_at
-					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+						id, username, display_name, role, password_hash, created_at, credentials_updated_at, mfa_secret, mfa_enabled_at, password_change_required_at, updated_at, disabled_at, last_login_at
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 				`, [
 					id,
 					username,
@@ -1026,6 +1067,7 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 					now,
 					null,
 					null,
+					now,
 					now,
 					null,
 					null
@@ -1041,6 +1083,7 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 					actor: input.auditActor,
 					eventType: "admin_user_create",
 					metadata: {
+						passwordChangeRequiredAt: now,
 						role: input.role,
 						username
 					},
@@ -1057,6 +1100,7 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 				credentialsUpdatedAt: now,
 				displayName,
 				id,
+				passwordChangeRequiredAt: now,
 				role: input.role,
 				username
 			};
@@ -1261,13 +1305,9 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 			};
 		},
 		async getGuidePackage(id) {
-			const result = await pool.query<GuidePackageRow>(`
-				SELECT id, election_slug, jurisdiction_slug, status, reviewer, review_notes, review_recommendation, coverage_notes, coverage_limits, created_at, drafted_at, reviewed_at, published_at, updated_at
-				FROM admin_guide_packages
-				WHERE id = $1
-			`, [id]);
+			const row = await getGuidePackageRow(id);
 
-			return result.rows[0] ? rowToGuidePackage(result.rows[0]) : null;
+			return row ? rowToGuidePackage(row) : null;
 		},
 		async getHealth() {
 			await pool.query("SELECT 1");
@@ -1409,30 +1449,54 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 				throw new Error("Guide package already exists.");
 
 			const now = new Date().toISOString();
+			const status = input.status ?? "draft";
+			const reviewer = input.reviewer?.trim() || null;
+			const reviewNotes = input.reviewNotes?.trim() || null;
+			const reviewRecommendation = input.reviewRecommendation || null;
+			const draftedAt = input.draftedAt || now;
 
-			await pool.query(`
-				INSERT INTO admin_guide_packages (
-					id, election_slug, jurisdiction_slug, status, reviewer, review_notes, review_recommendation, coverage_notes, coverage_limits,
-					created_at, drafted_at, reviewed_at, published_at, updated_at
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-			`, [
-				input.id,
-				input.electionSlug,
-				input.jurisdictionSlug,
-				input.status ?? "draft",
-				input.reviewer?.trim() || null,
-				input.reviewNotes?.trim() || null,
-				input.reviewRecommendation || null,
-				JSON.stringify(input.coverageNotes ?? []),
-				JSON.stringify(input.coverageLimits ?? []),
-				input.createdAt || now,
-				input.draftedAt || now,
-				input.reviewedAt || null,
-				input.publishedAt || null,
-				input.updatedAt || now
-			]);
+			validateGuidePackagePersistenceState({
+				coverageLimits: input.coverageLimits ?? [],
+				coverageNotes: input.coverageNotes ?? [],
+				draftedAt,
+				publishedAt: input.publishedAt || null,
+				reviewRecommendation,
+				reviewNotes,
+				reviewedAt: input.reviewedAt || null,
+				reviewer,
+				status
+			});
 
-			await logActivity("review", "Guide package drafted", `${input.electionSlug} guide package entered the ${(input.status ?? "draft").replaceAll("_", " ")} state.`);
+			await runTransaction(async (client) => {
+				await client.query(`
+					INSERT INTO admin_guide_packages (
+						id, election_slug, jurisdiction_slug, status, reviewer, review_notes, review_recommendation, coverage_notes, coverage_limits,
+						created_at, drafted_at, reviewed_at, published_at, updated_at
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+				`, [
+					input.id,
+					input.electionSlug,
+					input.jurisdictionSlug,
+					status,
+					reviewer,
+					reviewNotes,
+					reviewRecommendation,
+					JSON.stringify(input.coverageNotes ?? []),
+					JSON.stringify(input.coverageLimits ?? []),
+					input.createdAt || now,
+					draftedAt,
+					input.reviewedAt || null,
+					input.publishedAt || null,
+					input.updatedAt || now
+				]);
+
+				await logActivity(
+					"review",
+					"Guide package drafted",
+					`${input.electionSlug} guide package entered the ${status.replaceAll("_", " ")} state.`,
+					client
+				);
+			});
 			return await repository.listGuidePackages();
 		},
 		async listSourceMonitor() {
@@ -1488,13 +1552,19 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 					? current.password_hash
 					: hashPassword(normalizeAdminPassword(patch.password));
 				const shouldResetMfa = patch.mfaReset === true && Boolean(current.mfa_secret || current.mfa_enabled_at);
-				const shouldRotateCredentials = patch.password !== undefined || shouldResetMfa;
+				const disabledStateChanged = nextDisabledAt !== current.disabled_at;
+				const shouldRotateCredentials = patch.password !== undefined || shouldResetMfa || disabledStateChanged;
 				const nextCredentialsUpdatedAt = shouldRotateCredentials
 					? nextAdminCredentialTimestamp(current.credentials_updated_at || current.created_at)
 					: current.credentials_updated_at || current.created_at;
 				const nextUpdatedAt = shouldRotateCredentials ? nextCredentialsUpdatedAt : now;
 				const nextMfaSecret = patch.mfaReset === true ? null : current.mfa_secret;
 				const nextMfaEnabledAt = patch.mfaReset === true ? null : current.mfa_enabled_at;
+				const nextPasswordChangeRequiredAt = patch.password === undefined
+					? current.password_change_required_at
+					: patch.passwordChangeMode === "self-service"
+						? null
+						: nextCredentialsUpdatedAt;
 
 				if (patch.disabled && !current.disabled_at && current.role === "admin") {
 					const remainingAdmins = await client.query<CountRow>(`
@@ -1509,21 +1579,31 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 
 				await client.query(`
 					UPDATE admin_users
-					SET disabled_at = $1, password_hash = $2, mfa_secret = $3, mfa_enabled_at = $4, credentials_updated_at = $5, updated_at = $6
-					WHERE id = $7
-				`, [nextDisabledAt, nextPasswordHash, nextMfaSecret, nextMfaEnabledAt, nextCredentialsUpdatedAt, nextUpdatedAt, id]);
+					SET disabled_at = $1, password_hash = $2, mfa_secret = $3, mfa_enabled_at = $4, password_change_required_at = $5, credentials_updated_at = $6, updated_at = $7
+					WHERE id = $8
+				`, [
+					nextDisabledAt,
+					nextPasswordHash,
+					nextMfaSecret,
+					nextMfaEnabledAt,
+					nextPasswordChangeRequiredAt,
+					nextCredentialsUpdatedAt,
+					nextUpdatedAt,
+					id
+				]);
 
-				if (patch.disabled !== undefined && nextDisabledAt !== current.disabled_at) {
+				if (disabledStateChanged) {
 					await logActivity(
 						"review",
 						patch.disabled ? "Disabled admin user" : "Restored admin user",
-						`${current.display_name} ${patch.disabled ? "can no longer sign in" : "can sign in again"}.`,
+						`${current.display_name} ${patch.disabled ? "can no longer sign in" : "can sign in again"}. Existing sessions for this account are no longer valid.`,
 						client
 					);
 					await appendAuditEvent(client, {
 						actor: patch.auditActor,
 						eventType: patch.disabled ? "admin_user_disable" : "admin_user_restore",
 						metadata: {
+							credentialsUpdatedAt: nextCredentialsUpdatedAt,
 							disabledAt: nextDisabledAt,
 							username: current.username
 						},
@@ -1531,7 +1611,7 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 						targetId: current.id,
 						targetLabel: current.display_name,
 						targetType: "admin_user",
-						timestamp: now
+						timestamp: nextCredentialsUpdatedAt
 					});
 				}
 
@@ -1551,6 +1631,7 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 						eventType: isSelfService ? "admin_user_password_change" : "admin_user_password_reset",
 						metadata: {
 							credentialsUpdatedAt: nextCredentialsUpdatedAt,
+							passwordChangeRequiredAt: nextPasswordChangeRequiredAt,
 							selfService: isSelfService,
 							username: current.username
 						},
@@ -1590,57 +1671,61 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 			return await repository.listUsers();
 		},
 		async updateContent(id, patch) {
-			const current = await getContentRow(id);
+			validateContentPatch(patch);
+			await runTransaction(async (client) => {
+				const current = await getContentRow(id, client, true);
 
-			if (!current)
-				throw new Error("Content record not found.");
+				if (!current)
+					throw new Error("Content record not found.");
 
-			const now = new Date().toISOString();
-			const nextPublished = patch.published ?? current.published;
-			const nextStatus = patch.status || (nextPublished ? "published" : current.status === "published" ? "in-review" : current.status);
-			const nextPublishedAt = nextPublished ? current.published_at || now : null;
-			const nextPublishApprovedBy = nextPublished
-				? patch.publishApprovedBy === undefined ? current.publish_approved_by : patch.publishApprovedBy?.trim() || null
-				: null;
-			const nextPublishApprovalNote = nextPublished
-				? patch.publishApprovalNote === undefined ? current.publish_approval_note : patch.publishApprovalNote?.trim() || null
-				: null;
-			const approvalChanged = patch.publishApprovedBy !== undefined || patch.publishApprovalNote !== undefined;
-			const nextPublishApprovedAt = nextPublishApprovedBy
-				? approvalChanged ? now : current.publish_approved_at || now
-				: null;
-			const nextPublicSummary = patch.publicSummary === undefined ? current.public_summary || "" : patch.publicSummary.trim();
+				const now = new Date().toISOString();
+				const nextPublished = patch.published ?? current.published;
+				const nextStatus = patch.status || (nextPublished ? "published" : current.status === "published" ? "in-review" : current.status);
+				const nextPublishedAt = nextPublished ? current.published_at || now : null;
+				const nextPublishApprovedBy = nextPublished
+					? patch.publishApprovedBy === undefined ? current.publish_approved_by : patch.publishApprovedBy?.trim() || null
+					: null;
+				const nextPublishApprovalNote = nextPublished
+					? patch.publishApprovalNote === undefined ? current.publish_approval_note : patch.publishApprovalNote?.trim() || null
+					: null;
+				const approvalChanged = patch.publishApprovedBy !== undefined || patch.publishApprovalNote !== undefined;
+				const nextPublishApprovedAt = nextPublishApprovedBy
+					? approvalChanged ? now : current.publish_approved_at || now
+					: null;
+				const nextPublicSummary = patch.publicSummary === undefined ? current.public_summary || "" : patch.publicSummary.trim();
 
-			if (!nextPublicSummary)
-				throw new Error("Public page summary is required.");
+				if (!nextPublicSummary)
+					throw new Error("Public page summary is required.");
 
-			if (nextPublished && !nextPublishApprovedBy)
-				throw new Error("Publish approval reviewer is required before content can be published.");
+				if (nextPublished && !nextPublishApprovedBy)
+					throw new Error("Publish approval reviewer is required before content can be published.");
 
-			const nextBallotSummary = patch.publicBallotSummary === undefined
-				? current.ballot_summary
-				: patch.publicBallotSummary?.trim() || null;
-			const nextSnapshot: AdminContentSnapshot = {
-				assignedTo: patch.assignedTo?.trim() || current.assigned_to,
-				blocker: patch.blocker === undefined ? current.blocker || undefined : patch.blocker?.trim() || undefined,
-				priority: patch.priority ?? current.priority,
-				publicBallotSummary: nextBallotSummary || undefined,
-				publicSummary: nextPublicSummary,
-				published: nextPublished,
-				publishedAt: nextPublishedAt || undefined,
-				publishApprovedAt: nextPublishApprovedAt || undefined,
-				publishApprovedBy: nextPublishApprovedBy || undefined,
-				publishApprovalNote: nextPublishApprovalNote || undefined,
-				status: nextStatus,
-				updatedAt: now
-			};
-			const previousSnapshot = buildContentSnapshot(current);
-			const changedFields = changedContentFields(previousSnapshot, nextSnapshot);
+				const nextBallotSummary = patch.publicBallotSummary === undefined
+					? current.ballot_summary
+					: patch.publicBallotSummary?.trim() || null;
+				const nextSnapshot: AdminContentSnapshot = {
+					assignedTo: patch.assignedTo?.trim() || current.assigned_to,
+					blocker: patch.blocker === undefined ? current.blocker || undefined : patch.blocker?.trim() || undefined,
+					priority: patch.priority ?? current.priority,
+					publicBallotSummary: nextBallotSummary || undefined,
+					publicSummary: nextPublicSummary,
+					published: nextPublished,
+					publishedAt: nextPublishedAt || undefined,
+					publishApprovedAt: nextPublishApprovedAt || undefined,
+					publishApprovedBy: nextPublishApprovedBy || undefined,
+					publishApprovalNote: nextPublishApprovalNote || undefined,
+					status: nextStatus,
+					updatedAt: now
+				};
 
-			if (!changedFields.length)
-				return await repository.listContent();
+				validateContentSnapshotForPersistence(nextSnapshot);
+				const previousSnapshot = buildContentSnapshot(current);
+				const changedFields = changedContentFields(previousSnapshot, nextSnapshot);
 
-			await pool.query(`
+				if (!changedFields.length)
+					return;
+
+				await client.query(`
 				UPDATE admin_content
 				SET status = $1,
 					priority = $2,
@@ -1656,185 +1741,212 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 					updated_at = $12
 				WHERE id = $13
 			`, [
-				nextSnapshot.status,
-				nextSnapshot.priority,
-				nextSnapshot.assignedTo,
-				nextSnapshot.blocker || null,
-				nextSnapshot.publicSummary,
-				nextSnapshot.publicBallotSummary || null,
-				nextSnapshot.published,
-				nextSnapshot.publishedAt || null,
-				nextSnapshot.publishApprovedBy || null,
-				nextSnapshot.publishApprovedAt || null,
-				nextSnapshot.publishApprovalNote || null,
-				now,
-				id
-			]);
+					nextSnapshot.status,
+					nextSnapshot.priority,
+					nextSnapshot.assignedTo,
+					nextSnapshot.blocker || null,
+					nextSnapshot.publicSummary,
+					nextSnapshot.publicBallotSummary || null,
+					nextSnapshot.published,
+					nextSnapshot.publishedAt || null,
+					nextSnapshot.publishApprovedBy || null,
+					nextSnapshot.publishApprovedAt || null,
+					nextSnapshot.publishApprovalNote || null,
+					now,
+					id
+				]);
 
-			await writeContentHistory(
-				id,
-				now,
-				changedFields,
-				previousSnapshot,
-				nextSnapshot,
-				describeContentHistoryChange(current.title, changedFields)
-			);
+				await writeContentHistory(
+					id,
+					now,
+					changedFields,
+					previousSnapshot,
+					nextSnapshot,
+					describeContentHistoryChange(current.title, changedFields),
+					client
+				);
 
-			await logActivity(
-				nextPublished ? "publish" : "review",
-				`${current.title} updated`,
-				nextPublished
-					? `${current.title} is marked published and approved by ${nextSnapshot.publishApprovedBy}.`
-					: `${current.title} moved to ${nextStatus}.`
-			);
+				await logActivity(
+					nextPublished ? "publish" : "review",
+					`${current.title} updated`,
+					nextPublished
+						? `${current.title} is marked published and approved by ${nextSnapshot.publishApprovedBy}.`
+						: `${current.title} moved to ${nextStatus}.`,
+					client
+				);
 
-			if (
-				changedFields.includes("published")
-				|| changedFields.includes("publishApprovedAt")
-				|| changedFields.includes("publishApprovedBy")
-				|| changedFields.includes("publishApprovalNote")
-			) {
-				await recordAuditEvent({
-					actor: patch.auditActor,
-					eventType: nextPublished ? "content_publish" : "content_unpublish",
+				if (
+					changedFields.includes("published")
+					|| changedFields.includes("publishApprovedAt")
+					|| changedFields.includes("publishApprovedBy")
+					|| changedFields.includes("publishApprovalNote")
+				) {
+					await appendAuditEvent(client, {
+						actor: patch.auditActor,
+						eventType: nextPublished ? "content_publish" : "content_unpublish",
+						metadata: {
+							changedFields,
+							entitySlug: current.entity_slug,
+							entityType: current.entity_type,
+							publishApprovedAt: nextSnapshot.publishApprovedAt ?? null,
+							publishApprovedBy: nextSnapshot.publishApprovedBy ?? null
+						},
+						summary: nextPublished
+							? `${current.title} was published with reviewer approval.`
+							: `${current.title} was unpublished and approval metadata was cleared.`,
+						targetId: current.id,
+						targetLabel: current.title,
+						targetType: "admin_content",
+						timestamp: now
+					});
+				}
+			});
+
+			return await repository.listContent();
+		},
+		async rollbackContent(id, historyId, auditActor) {
+			await runTransaction(async (client) => {
+				const current = await getContentRow(id, client, true);
+
+				if (!current)
+					throw new Error("Content record not found.");
+
+				const historyResult = await client.query<ContentHistoryRow>(`
+				SELECT id, content_id, changed_at, changed_fields, previous_snapshot, next_snapshot, summary
+				FROM admin_content_history
+				WHERE id = $1 AND content_id = $2
+			`, [historyId, id]);
+				const historyRow = historyResult.rows[0];
+
+				if (!historyRow)
+					throw new Error("Content history record not found.");
+
+				const now = new Date().toISOString();
+				const previousSnapshot = buildContentSnapshot(current);
+				const rollbackValues = snapshotToContentUpdateValues(parseContentSnapshot(historyRow.previous_snapshot));
+
+				if (!rollbackValues.publicSummary)
+					throw new Error("Rollback target has no public page summary.");
+
+				const nextSnapshot: AdminContentSnapshot = {
+					assignedTo: rollbackValues.assignedTo,
+					blocker: rollbackValues.blocker || undefined,
+					priority: rollbackValues.priority,
+					publicBallotSummary: rollbackValues.publicBallotSummary || undefined,
+					publicSummary: rollbackValues.publicSummary,
+					published: rollbackValues.published,
+					publishedAt: rollbackValues.publishedAt || undefined,
+					publishApprovedAt: rollbackValues.publishApprovedAt || undefined,
+					publishApprovedBy: rollbackValues.publishApprovedBy || undefined,
+					publishApprovalNote: rollbackValues.publishApprovalNote || undefined,
+					status: rollbackValues.status,
+					updatedAt: now
+				};
+
+				validateContentSnapshotForPersistence(nextSnapshot);
+				const changedFields = changedContentFields(previousSnapshot, nextSnapshot);
+
+				if (!changedFields.length)
+					return;
+
+				await client.query(`
+				UPDATE admin_content
+				SET status = $1,
+					priority = $2,
+					assigned_to = $3,
+					blocker = $4,
+					public_summary = $5,
+					ballot_summary = $6,
+					published = $7,
+					published_at = $8,
+					publish_approved_by = $9,
+					publish_approved_at = $10,
+					publish_approval_note = $11,
+					updated_at = $12
+				WHERE id = $13
+			`, [
+					nextSnapshot.status,
+					nextSnapshot.priority,
+					nextSnapshot.assignedTo,
+					nextSnapshot.blocker || null,
+					nextSnapshot.publicSummary,
+					nextSnapshot.publicBallotSummary || null,
+					nextSnapshot.published,
+					nextSnapshot.publishedAt || null,
+					nextSnapshot.publishApprovedBy || null,
+					nextSnapshot.publishApprovedAt || null,
+					nextSnapshot.publishApprovalNote || null,
+					now,
+					id
+				]);
+
+				await writeContentHistory(
+					id,
+					now,
+					changedFields,
+					previousSnapshot,
+					nextSnapshot,
+					`Rolled back ${current.title} to the version from ${historyRow.changed_at}.`,
+					client
+				);
+				await logActivity(
+					"review",
+					`${current.title} rolled back`,
+					`Restored public content fields from the ${historyRow.changed_at} revision.`,
+					client
+				);
+				await appendAuditEvent(client, {
+					actor: auditActor,
+					eventType: "content_rollback",
 					metadata: {
 						changedFields,
-						entitySlug: current.entity_slug,
-						entityType: current.entity_type,
-						publishApprovedAt: nextSnapshot.publishApprovedAt ?? null,
-						publishApprovedBy: nextSnapshot.publishApprovedBy ?? null
+						restoredFromHistoryId: historyRow.id,
+						restoredFromTimestamp: historyRow.changed_at
 					},
-					summary: nextPublished
-						? `${current.title} was published with reviewer approval.`
-						: `${current.title} was unpublished and approval metadata was cleared.`,
+					summary: `${current.title} was rolled back to the ${historyRow.changed_at} revision.`,
 					targetId: current.id,
 					targetLabel: current.title,
 					targetType: "admin_content",
 					timestamp: now
 				});
-			}
-
-			return await repository.listContent();
-		},
-		async rollbackContent(id, historyId, auditActor) {
-			const current = await getContentRow(id);
-
-			if (!current)
-				throw new Error("Content record not found.");
-
-			const historyResult = await pool.query<ContentHistoryRow>(`
-				SELECT id, content_id, changed_at, changed_fields, previous_snapshot, next_snapshot, summary
-				FROM admin_content_history
-				WHERE id = $1 AND content_id = $2
-			`, [historyId, id]);
-			const historyRow = historyResult.rows[0];
-
-			if (!historyRow)
-				throw new Error("Content history record not found.");
-
-			const now = new Date().toISOString();
-			const previousSnapshot = buildContentSnapshot(current);
-			const rollbackValues = snapshotToContentUpdateValues(parseContentSnapshot(historyRow.previous_snapshot));
-
-			if (!rollbackValues.publicSummary)
-				throw new Error("Rollback target has no public page summary.");
-
-			const nextSnapshot: AdminContentSnapshot = {
-				assignedTo: rollbackValues.assignedTo,
-				blocker: rollbackValues.blocker || undefined,
-				priority: rollbackValues.priority,
-				publicBallotSummary: rollbackValues.publicBallotSummary || undefined,
-				publicSummary: rollbackValues.publicSummary,
-				published: rollbackValues.published,
-				publishedAt: rollbackValues.publishedAt || undefined,
-				publishApprovedAt: rollbackValues.publishApprovedAt || undefined,
-				publishApprovedBy: rollbackValues.publishApprovedBy || undefined,
-				publishApprovalNote: rollbackValues.publishApprovalNote || undefined,
-				status: rollbackValues.status,
-				updatedAt: now
-			};
-			const changedFields = changedContentFields(previousSnapshot, nextSnapshot);
-
-			if (!changedFields.length)
-				return await repository.listContent();
-
-			await pool.query(`
-				UPDATE admin_content
-				SET status = $1,
-					priority = $2,
-					assigned_to = $3,
-					blocker = $4,
-					public_summary = $5,
-					ballot_summary = $6,
-					published = $7,
-					published_at = $8,
-					publish_approved_by = $9,
-					publish_approved_at = $10,
-					publish_approval_note = $11,
-					updated_at = $12
-				WHERE id = $13
-			`, [
-				nextSnapshot.status,
-				nextSnapshot.priority,
-				nextSnapshot.assignedTo,
-				nextSnapshot.blocker || null,
-				nextSnapshot.publicSummary,
-				nextSnapshot.publicBallotSummary || null,
-				nextSnapshot.published,
-				nextSnapshot.publishedAt || null,
-				nextSnapshot.publishApprovedBy || null,
-				nextSnapshot.publishApprovedAt || null,
-				nextSnapshot.publishApprovalNote || null,
-				now,
-				id
-			]);
-
-			await writeContentHistory(
-				id,
-				now,
-				changedFields,
-				previousSnapshot,
-				nextSnapshot,
-				`Rolled back ${current.title} to the version from ${historyRow.changed_at}.`
-			);
-			await logActivity("review", `${current.title} rolled back`, `Restored public content fields from the ${historyRow.changed_at} revision.`);
-			await recordAuditEvent({
-				actor: auditActor,
-				eventType: "content_rollback",
-				metadata: {
-					changedFields,
-					restoredFromHistoryId: historyRow.id,
-					restoredFromTimestamp: historyRow.changed_at
-				},
-				summary: `${current.title} was rolled back to the ${historyRow.changed_at} revision.`,
-				targetId: current.id,
-				targetLabel: current.title,
-				targetType: "admin_content",
-				timestamp: now
 			});
 
 			return await repository.listContent();
 		},
 		async updateGuidePackage(id, patch: GuidePackagePatch) {
-			const current = await repository.getGuidePackage(id);
+			await runTransaction(async (client) => {
+				const currentRow = await getGuidePackageRow(id, client, true);
+				const current = currentRow ? rowToGuidePackage(currentRow) : null;
 
-			if (!current)
-				throw new Error("Guide package not found.");
+				if (!current)
+					throw new Error("Guide package not found.");
 
-			const now = new Date().toISOString();
-			const nextStatus = patch.status ?? current.status;
-			const nextReviewer = patch.reviewer === undefined ? current.reviewer ?? null : patch.reviewer?.trim() || null;
-			const nextReviewRecommendation = patch.reviewRecommendation === undefined
-				? current.reviewRecommendation ?? null
-				: patch.reviewRecommendation || null;
-			const nextReviewNotes = patch.reviewNotes === undefined ? current.reviewNotes ?? null : patch.reviewNotes?.trim() || null;
-			const nextCoverageNotes = patch.coverageNotes === undefined ? current.coverageNotes : patch.coverageNotes ?? [];
-			const nextCoverageLimits = patch.coverageLimits === undefined ? current.coverageLimits : patch.coverageLimits ?? [];
-			const nextDraftedAt = patch.draftedAt || current.draftedAt;
-			const nextReviewedAt = patch.reviewedAt === undefined ? current.reviewedAt ?? null : patch.reviewedAt;
-			const nextPublishedAt = patch.publishedAt === undefined ? current.publishedAt ?? null : patch.publishedAt;
+				const now = new Date().toISOString();
+				const nextStatus = patch.status ?? current.status;
+				const nextReviewer = patch.reviewer === undefined ? current.reviewer ?? null : patch.reviewer?.trim() || null;
+				const nextReviewRecommendation = patch.reviewRecommendation === undefined
+					? current.reviewRecommendation ?? null
+					: patch.reviewRecommendation || null;
+				const nextReviewNotes = patch.reviewNotes === undefined ? current.reviewNotes ?? null : patch.reviewNotes?.trim() || null;
+				const nextCoverageNotes = patch.coverageNotes === undefined ? current.coverageNotes : patch.coverageNotes ?? [];
+				const nextCoverageLimits = patch.coverageLimits === undefined ? current.coverageLimits : patch.coverageLimits ?? [];
+				const nextDraftedAt = patch.draftedAt || current.draftedAt;
+				const nextReviewedAt = patch.reviewedAt === undefined ? current.reviewedAt ?? null : patch.reviewedAt;
+				const nextPublishedAt = patch.publishedAt === undefined ? current.publishedAt ?? null : patch.publishedAt;
 
-			await pool.query(`
+				validateGuidePackagePersistenceState({
+					coverageLimits: nextCoverageLimits,
+					coverageNotes: nextCoverageNotes,
+					draftedAt: nextDraftedAt,
+					publishedAt: nextPublishedAt,
+					reviewRecommendation: nextReviewRecommendation,
+					reviewNotes: nextReviewNotes,
+					reviewedAt: nextReviewedAt,
+					reviewer: nextReviewer,
+					status: nextStatus
+				});
+
+				await client.query(`
 				UPDATE admin_guide_packages
 				SET status = $1,
 					reviewer = $2,
@@ -1848,66 +1960,70 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 					updated_at = $10
 				WHERE id = $11
 			`, [
-				nextStatus,
-				nextReviewer,
-				nextReviewNotes,
-				nextReviewRecommendation,
-				JSON.stringify(nextCoverageNotes),
-				JSON.stringify(nextCoverageLimits),
-				nextDraftedAt,
-				nextReviewedAt,
-				nextPublishedAt,
-				now,
-				id
-			]);
+					nextStatus,
+					nextReviewer,
+					nextReviewNotes,
+					nextReviewRecommendation,
+					JSON.stringify(nextCoverageNotes),
+					JSON.stringify(nextCoverageLimits),
+					nextDraftedAt,
+					nextReviewedAt,
+					nextPublishedAt,
+					now,
+					id
+				]);
 
-			await logActivity(
-				nextStatus === "published" ? "publish" : "review",
-				`Guide package ${current.electionSlug} updated`,
-				`Guide package moved to ${nextStatus.replaceAll("_", " ")}.`
-			);
+				await logActivity(
+					nextStatus === "published" ? "publish" : "review",
+					`Guide package ${current.electionSlug} updated`,
+					`Guide package moved to ${nextStatus.replaceAll("_", " ")}.`,
+					client
+				);
 
-			if (current.status !== "published" && nextStatus === "published") {
-				await recordAuditEvent({
-					actor: patch.auditActor,
-					eventType: "guide_package_publish",
-					metadata: {
-						electionSlug: current.electionSlug,
-						jurisdictionSlug: current.jurisdictionSlug,
-						publishedAt: nextPublishedAt,
-						reviewRecommendation: nextReviewRecommendation,
-						reviewer: nextReviewer
-					},
-					summary: `${current.electionSlug} guide package was published.`,
-					targetId: current.id,
-					targetLabel: current.electionSlug,
-					targetType: "guide_package",
-					timestamp: now
-				});
-			}
-			else if (current.status === "published" && nextStatus !== "published") {
-				await recordAuditEvent({
-					actor: patch.auditActor,
-					eventType: "guide_package_unpublish",
-					metadata: {
-						electionSlug: current.electionSlug,
-						jurisdictionSlug: current.jurisdictionSlug,
-						nextStatus,
-						reviewRecommendation: nextReviewRecommendation,
-						reviewer: nextReviewer
-					},
-					summary: `${current.electionSlug} guide package was unpublished.`,
-					targetId: current.id,
-					targetLabel: current.electionSlug,
-					targetType: "guide_package",
-					timestamp: now
-				});
-			}
+				if (current.status !== "published" && nextStatus === "published") {
+					await appendAuditEvent(client, {
+						actor: patch.auditActor,
+						eventType: "guide_package_publish",
+						metadata: {
+							electionSlug: current.electionSlug,
+							jurisdictionSlug: current.jurisdictionSlug,
+							publishedAt: nextPublishedAt,
+							reviewRecommendation: nextReviewRecommendation,
+							reviewer: nextReviewer
+						},
+						summary: `${current.electionSlug} guide package was published.`,
+						targetId: current.id,
+						targetLabel: current.electionSlug,
+						targetType: "guide_package",
+						timestamp: now
+					});
+				}
+				else if (current.status === "published" && nextStatus !== "published") {
+					await appendAuditEvent(client, {
+						actor: patch.auditActor,
+						eventType: "guide_package_unpublish",
+						metadata: {
+							electionSlug: current.electionSlug,
+							jurisdictionSlug: current.jurisdictionSlug,
+							nextStatus,
+							reviewRecommendation: nextReviewRecommendation,
+							reviewer: nextReviewer
+						},
+						summary: `${current.electionSlug} guide package was unpublished.`,
+						targetId: current.id,
+						targetLabel: current.electionSlug,
+						targetType: "guide_package",
+						timestamp: now
+					});
+				}
+			});
 
 			return await repository.listGuidePackages();
 		},
 		async updateCorrection(id, patch) {
-			const currentResult = await pool.query<CorrectionRow>(`
+			validateCorrectionPatch(patch);
+			await runTransaction(async (client) => {
+				const currentResult = await client.query<CorrectionRow>(`
 					SELECT
 						c.id,
 						c.submission_type,
@@ -1927,68 +2043,135 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 					FROM admin_corrections c
 					LEFT JOIN admin_content content ON content.id = c.content_id
 					WHERE c.id = $1
+					FOR UPDATE OF c
 				`, [id]);
-			const current = currentResult.rows[0];
+				const current = currentResult.rows[0];
 
-			if (!current)
-				throw new Error("Correction record not found.");
+				if (!current)
+					throw new Error("Correction record not found.");
 
-			const contentId = patch.contentId === undefined
-				? current.content_id
-				: await resolvePatchContentId(patch.contentId);
+				const contentId = patch.contentId === undefined
+					? current.content_id
+					: await resolvePatchContentId(patch.contentId, client);
+				const nextStatus = patch.status ?? current.status;
+				const nextPriority = patch.priority ?? current.priority;
+				const nextStep = patch.nextStep?.trim() || current.next_step;
+				const now = new Date().toISOString();
 
-			await pool.query(`
+				await client.query(`
 					UPDATE admin_corrections
 					SET status = $1, priority = $2, next_step = $3, content_id = $4
 					WHERE id = $5
 				`, [
-				patch.status ?? current.status,
-				patch.priority ?? current.priority,
-				patch.nextStep?.trim() || current.next_step,
-				contentId,
-				id
-			]);
+					nextStatus,
+					nextPriority,
+					nextStep,
+					contentId,
+					id
+				]);
 
-			const linkageSummary = contentId === current.content_id
-				? ""
-				: contentId
-					? " Linked to a content record."
-					: " Removed linked content record.";
-			await logActivity(
-				"correction",
-				`${current.subject} updated`,
-				`Correction item moved to ${patch.status ?? current.status}.${linkageSummary}`
-			);
+				const linkageSummary = contentId === current.content_id
+					? ""
+					: contentId
+						? " Linked to a content record."
+						: " Removed linked content record.";
+				await logActivity(
+					"correction",
+					`${current.subject} updated`,
+					`Correction item moved to ${nextStatus}.${linkageSummary}`,
+					client
+				);
+
+				if (current.status !== "new" || nextStatus !== "new") {
+					const eventType = current.status === "new" && nextStatus !== "new"
+						? "correction_publish"
+						: current.status !== "new" && nextStatus === "new"
+							? "correction_unpublish"
+							: "correction_public_update";
+
+					await appendAuditEvent(client, {
+						actor: patch.auditActor,
+						eventType,
+						metadata: {
+							contentId,
+							nextPriority,
+							nextStatus,
+							previousContentId: current.content_id,
+							previousPriority: current.priority,
+							previousStatus: current.status
+						},
+						summary: eventType === "correction_publish"
+							? `${current.subject} was promoted from private intake to the public corrections log.`
+							: eventType === "correction_unpublish"
+								? `${current.subject} was removed from the public corrections log and returned to private intake.`
+								: `${current.subject} public correction record was updated.`,
+						targetId: current.id,
+						targetLabel: current.subject,
+						targetType: "correction",
+						timestamp: now
+					});
+				}
+			});
 
 			return await repository.listCorrections();
 		},
 		async updateSource(id, patch) {
-			const currentResult = await pool.query<SourceRow>(`
-				SELECT id, label, authority, health, last_checked_at, next_check_at, owner, note
-				FROM admin_source_monitors
-				WHERE id = $1
-			`, [id]);
-			const current = currentResult.rows[0];
+			validateSourcePatch(patch);
+			await runTransaction(async (client) => {
+				const currentResult = await client.query<SourceRow>(`
+					SELECT id, label, authority, health, last_checked_at, next_check_at, owner, note
+					FROM admin_source_monitors
+					WHERE id = $1
+					FOR UPDATE
+				`, [id]);
+				const current = currentResult.rows[0];
 
-			if (!current)
-				throw new Error("Source monitor record not found.");
+				if (!current)
+					throw new Error("Source monitor record not found.");
 
-			const now = new Date().toISOString();
+				const now = new Date().toISOString();
+				const nextHealth = patch.health ?? current.health;
+				const nextCheckAt = patch.nextCheckAt?.trim() || current.next_check_at;
+				const nextOwner = patch.owner?.trim() || current.owner;
+				const nextNote = patch.note?.trim() || current.note;
 
-			await pool.query(`
-				UPDATE admin_source_monitors
-				SET health = $1, last_checked_at = $2, next_check_at = $3, owner = $4, note = $5
-				WHERE id = $6
-			`, [
-				patch.health ?? current.health,
-				now,
-				patch.nextCheckAt?.trim() || current.next_check_at,
-				patch.owner?.trim() || current.owner,
-				patch.note?.trim() || current.note,
-				id
-			]);
+				await client.query(`
+					UPDATE admin_source_monitors
+					SET health = $1, last_checked_at = $2, next_check_at = $3, owner = $4, note = $5
+					WHERE id = $6
+				`, [
+					nextHealth,
+					now,
+					nextCheckAt,
+					nextOwner,
+					nextNote,
+					id
+				]);
 
-			await logActivity("source-check", `${current.label} updated`, `Source monitor status is now ${patch.health ?? current.health}.`);
+				await logActivity(
+					"source-check",
+					`${current.label} updated`,
+					`Source monitor status is now ${nextHealth}.`,
+					client
+				);
+				await appendAuditEvent(client, {
+					actor: patch.auditActor,
+					eventType: "source_monitor_update",
+					metadata: {
+						health: nextHealth,
+						nextCheckAt,
+						owner: nextOwner,
+						previousHealth: current.health,
+						previousNextCheckAt: current.next_check_at,
+						previousOwner: current.owner
+					},
+					summary: `${current.label} source monitor was checked and updated.`,
+					targetId: current.id,
+					targetLabel: current.label,
+					targetType: "source_monitor",
+					timestamp: now
+				});
+			});
 
 			return await repository.listSourceMonitor();
 		}

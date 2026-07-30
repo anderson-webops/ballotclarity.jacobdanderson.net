@@ -4,6 +4,9 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import process from "node:process";
 import { createError } from "h3";
 import { useRuntimeConfig } from "#imports";
+import { createBoundedRequestThrottle } from "./bounded-request-throttle";
+import { isAllowedContactAddressOrigin } from "./contact-origin";
+import { getTrustedClientAddress } from "./proxy-address";
 
 export const contactAddressNonceCookieName = "ballot_clarity_contact_nonce";
 export const contactAddressNonceHeaderName = "x-ballot-clarity-contact-nonce";
@@ -11,8 +14,6 @@ export const contactAddressNonceHeaderName = "x-ballot-clarity-contact-nonce";
 const contactAddressSessionCookieName = "ballot_clarity_contact_session";
 const contactAddressSessionMaxAgeSeconds = 10 * 60;
 const contactAddressSessionVersion = 1;
-const contactAddressRateLimitWindowMs = 60 * 1000;
-const contactAddressRateLimitMax = 12;
 const startupContactAddressSessionSecret = randomBytes(32).toString("base64url");
 const defaultContactAddressCodes = [
 	104,
@@ -39,7 +40,17 @@ const defaultContactAddressCodes = [
 	114,
 	103
 ] as const;
-const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function getPositiveIntegerEnv(name: string, fallback: number) {
+	const value = Number(process.env[name]);
+	return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+const contactAddressRateLimiter = createBoundedRequestThrottle({
+	maxBuckets: getPositiveIntegerEnv("CONTACT_ADDRESS_RATE_LIMIT_MAX_BUCKETS", 10_000),
+	maxRequests: getPositiveIntegerEnv("CONTACT_ADDRESS_RATE_LIMIT_MAX", 12),
+	windowMs: getPositiveIntegerEnv("CONTACT_ADDRESS_RATE_LIMIT_WINDOW_MS", 60 * 1000)
+});
 
 interface ContactAddressSessionPayload {
 	expiresAt: number;
@@ -85,13 +96,25 @@ function serializeSession(payload: ContactAddressSessionPayload, sessionSecret: 
 }
 
 function parseSession(rawValue: string | undefined, sessionSecret: string) {
-	if (!rawValue)
+	if (!rawValue || rawValue.length > 2048)
 		return null;
 
-	const [encodedPayload, signature] = rawValue.split(".");
+	const tokenParts = rawValue.split(".");
 
-	if (!encodedPayload || !signature)
+	if (tokenParts.length !== 2)
 		return null;
+
+	const [encodedPayload, signature] = tokenParts;
+
+	if (
+		!encodedPayload
+		|| encodedPayload.length > 1024
+		|| !/^[\w-]+$/u.test(encodedPayload)
+		|| !signature
+		|| !/^[\w-]{43}$/u.test(signature)
+	) {
+		return null;
+	}
 
 	const expectedSignature = signPayload(encodedPayload, sessionSecret);
 
@@ -101,8 +124,15 @@ function parseSession(rawValue: string | undefined, sessionSecret: string) {
 	try {
 		const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as Partial<ContactAddressSessionPayload>;
 
-		if (payload.version !== contactAddressSessionVersion || typeof payload.expiresAt !== "number" || typeof payload.nonceHash !== "string")
+		if (
+			payload.version !== contactAddressSessionVersion
+			|| typeof payload.expiresAt !== "number"
+			|| !Number.isSafeInteger(payload.expiresAt)
+			|| typeof payload.nonceHash !== "string"
+			|| !/^[\w-]{43}$/u.test(payload.nonceHash)
+		) {
 			return null;
+		}
 
 		if (payload.expiresAt <= Date.now())
 			return null;
@@ -223,12 +253,17 @@ function getContactAddressSessionSecret(event: H3Event) {
 	const runtimeConfig = useRuntimeConfig(event);
 	const configuredSecret = process.env.NUXT_CONTACT_ADDRESS_SESSION_SECRET
 		|| process.env.CONTACT_ADDRESS_SESSION_SECRET
-		|| String(runtimeConfig.contactAddressSessionSecret || "")
-		|| process.env.NUXT_ADMIN_SESSION_SECRET
-		|| process.env.ADMIN_SESSION_SECRET
-		|| "";
+		|| String(runtimeConfig.contactAddressSessionSecret || "");
+	const normalizedSecret = configuredSecret.trim();
 
-	return configuredSecret || startupContactAddressSessionSecret;
+	if (process.env.NODE_ENV === "production" && normalizedSecret.length < 32) {
+		throw createError({
+			statusCode: 503,
+			statusMessage: "Protected contact lookup is unavailable."
+		});
+	}
+
+	return normalizedSecret || startupContactAddressSessionSecret;
 }
 
 function getConfiguredContactAddress(event: H3Event) {
@@ -240,56 +275,37 @@ function getConfiguredContactAddress(event: H3Event) {
 	return configuredAddress.trim() || decodeCharacterCodes(defaultContactAddressCodes);
 }
 
-function getRequestOrigin(event: H3Event) {
-	const requestUrl = getNodeRequestURL(event);
-	const forwardedHost = getFirstHeaderValue(getNodeRequestHeader(event, "x-forwarded-host"));
-	const forwardedProto = getFirstHeaderValue(getNodeRequestHeader(event, "x-forwarded-proto"));
-	const host = forwardedHost || getFirstHeaderValue(getNodeRequestHeader(event, "host")) || requestUrl.host;
-	const protocol = forwardedProto || requestUrl.protocol.replace(/:$/, "") || "https";
+function getExpectedRequestOrigin(event: H3Event) {
+	if (process.env.NODE_ENV !== "production")
+		return getNodeRequestURL(event).origin;
 
-	return `${protocol}://${host}`;
-}
-
-function readOriginHeader(value: string | undefined) {
-	if (!value)
-		return "";
+	const configuredSiteUrl = String(useRuntimeConfig(event).public.siteUrl || "").trim();
 
 	try {
-		return new URL(value).origin;
+		return new URL(configuredSiteUrl).origin;
 	}
 	catch {
-		return "";
+		throw createError({
+			statusCode: 503,
+			statusMessage: "Protected contact lookup is unavailable."
+		});
 	}
 }
 
 function getClientRateLimitKey(event: H3Event) {
-	const forwardedFor = getNodeRequestHeader(event, "x-forwarded-for")?.split(",")[0]?.trim();
-	const realIp = getNodeRequestHeader(event, "x-real-ip")?.trim();
-
-	return forwardedFor || realIp || event.node?.req.socket.remoteAddress || "unknown";
+	return event.node?.req
+		? getTrustedClientAddress(event.node.req)
+		: "unknown";
 }
 
 function enforceSameOrigin(event: H3Event) {
-	const expectedOrigin = getRequestOrigin(event);
-	const requestOrigin = readOriginHeader(getNodeRequestHeader(event, "origin"));
-	const referrerOrigin = readOriginHeader(getNodeRequestHeader(event, "referer"));
-	const fetchSite = getNodeRequestHeader(event, "sec-fetch-site")?.toLowerCase();
-
-	if (fetchSite && !["none", "same-origin"].includes(fetchSite)) {
-		throw createError({
-			statusCode: 403,
-			statusMessage: "Same-origin contact lookup required."
-		});
-	}
-
-	if (requestOrigin && requestOrigin !== expectedOrigin) {
-		throw createError({
-			statusCode: 403,
-			statusMessage: "Same-origin contact lookup required."
-		});
-	}
-
-	if (referrerOrigin && referrerOrigin !== expectedOrigin) {
+	if (!isAllowedContactAddressOrigin({
+		expectedOrigin: getExpectedRequestOrigin(event),
+		fetchSite: getNodeRequestHeader(event, "sec-fetch-site"),
+		origin: getNodeRequestHeader(event, "origin"),
+		production: process.env.NODE_ENV === "production",
+		referrer: getNodeRequestHeader(event, "referer"),
+	})) {
 		throw createError({
 			statusCode: 403,
 			statusMessage: "Same-origin contact lookup required."
@@ -298,39 +314,21 @@ function enforceSameOrigin(event: H3Event) {
 }
 
 function enforceRateLimit(event: H3Event) {
-	const now = Date.now();
 	const key = getClientRateLimitKey(event);
-	const bucket = rateLimitBuckets.get(key);
+	const throttleState = contactAddressRateLimiter.attempt(key);
 
-	for (const [bucketKey, value] of rateLimitBuckets) {
-		if (value.resetAt <= now)
-			rateLimitBuckets.delete(bucketKey);
-	}
-
-	if (!bucket || bucket.resetAt <= now) {
-		rateLimitBuckets.set(key, {
-			count: 1,
-			resetAt: now + contactAddressRateLimitWindowMs
-		});
+	if (throttleState.allowed)
 		return;
-	}
 
-	bucket.count += 1;
-
-	if (bucket.count > contactAddressRateLimitMax) {
-		setNodeResponseHeader(event, "Retry-After", String(Math.ceil((bucket.resetAt - now) / 1000)));
-		throw createError({
-			statusCode: 429,
-			statusMessage: "Too many contact address requests."
-		});
-	}
+	setNodeResponseHeader(event, "Retry-After", String(throttleState.retryAfterSeconds));
+	throw createError({
+		statusCode: 429,
+		statusMessage: "Too many contact address requests."
+	});
 }
 
 function isSecureRequest(event: H3Event) {
-	const forwardedProto = getFirstHeaderValue(getNodeRequestHeader(event, "x-forwarded-proto")).toLowerCase();
-	const requestUrl = getNodeRequestURL(event);
-
-	return forwardedProto === "https" || requestUrl.protocol === "https:";
+	return new URL(getExpectedRequestOrigin(event)).protocol === "https:";
 }
 
 function issueContactAddressChallenge(event: H3Event, sessionSecret: string) {
@@ -347,14 +345,14 @@ function issueContactAddressChallenge(event: H3Event, sessionSecret: string) {
 		httpOnly: true,
 		maxAge: contactAddressSessionMaxAgeSeconds,
 		path: "/",
-		sameSite: "lax",
+		sameSite: "strict",
 		secure
 	});
 	setNodeCookie(event, contactAddressNonceCookieName, nonce, {
 		httpOnly: false,
 		maxAge: contactAddressSessionMaxAgeSeconds,
 		path: "/",
-		sameSite: "lax",
+		sameSite: "strict",
 		secure
 	});
 }

@@ -29,6 +29,8 @@ test("nuxt config uses srcDir and expected civic modules", async () => {
 		["@nuxt/eslint", "@nuxtjs/color-mode", "@pinia/nuxt", "@unocss/nuxt", "@vueuse/nuxt"].sort()
 	);
 	assert.equal(config.runtimeConfig?.public?.apiBase, "http://127.0.0.1:3001/api");
+	assert.equal(config.runtimeConfig?.public?.apiFetchTimeoutMs, 15_000);
+	assert.equal(config.runtimeConfig?.adminApiFetchTimeoutMs, 15_000);
 	assert.ok(typeof config.runtimeConfig?.public?.buildId === "string" && config.runtimeConfig.public.buildId.length > 0);
 	assert.equal(config.runtimeConfig?.public?.siteUrl, "https://ballotclarity.org");
 	assert.equal(config.runtimeConfig?.public?.operatorLegalName, "Jacob Anderson");
@@ -75,15 +77,16 @@ test("nuxt config uses srcDir and expected civic modules", async () => {
 		typeof script.src === "string" && script.src.includes("jacobdanderson.net")
 	));
 	assert.ok(config.app?.head?.link?.some(link => link.rel === "manifest" && typeof link.href === "string" && link.href.startsWith("/site.webmanifest")));
-	const contentSecurityPolicyReportOnly = config.nitro?.routeRules?.["/**"]?.headers?.["content-security-policy-report-only"];
-	assert.match(contentSecurityPolicyReportOnly ?? "", /default-src 'self'/);
-	assert.match(contentSecurityPolicyReportOnly ?? "", /base-uri 'self'/);
-	assert.match(contentSecurityPolicyReportOnly ?? "", /frame-ancestors 'none'/);
-	assert.match(contentSecurityPolicyReportOnly ?? "", /object-src 'none'/);
-	assert.match(contentSecurityPolicyReportOnly ?? "", /script-src 'self' 'unsafe-inline' https:\/\/analytics\.ballotclarity\.org/);
-	assert.match(contentSecurityPolicyReportOnly ?? "", /connect-src 'self' http:\/\/127\.0\.0\.1:3001 https:\/\/analytics\.ballotclarity\.org/);
+	const contentSecurityPolicy = config.nitro?.routeRules?.["/**"]?.headers?.["content-security-policy"];
+	assert.match(contentSecurityPolicy ?? "", /default-src 'self'/);
+	assert.match(contentSecurityPolicy ?? "", /base-uri 'self'/);
+	assert.match(contentSecurityPolicy ?? "", /frame-ancestors 'none'/);
+	assert.match(contentSecurityPolicy ?? "", /object-src 'none'/);
+	assert.match(contentSecurityPolicy ?? "", /script-src 'self' https:\/\/analytics\.ballotclarity\.org/);
+	assert.doesNotMatch(contentSecurityPolicy?.match(/script-src [^;]+/)?.[0] ?? "", /'unsafe-inline'/);
+	assert.match(contentSecurityPolicy ?? "", /connect-src 'self' http:\/\/127\.0\.0\.1:3001 http:\/\/127\.0\.0\.1:\* https:\/\/analytics\.ballotclarity\.org/);
 	assert.deepEqual(config.nitro?.routeRules?.["/**"]?.headers, {
-		"content-security-policy-report-only": contentSecurityPolicyReportOnly,
+		"content-security-policy": contentSecurityPolicy,
 		"cross-origin-opener-policy": "same-origin",
 		"cross-origin-resource-policy": "same-origin",
 		"origin-agent-cluster": "?1",
@@ -95,7 +98,8 @@ test("nuxt config uses srcDir and expected civic modules", async () => {
 		"x-frame-options": "DENY"
 	});
 	assert.equal(config.nitro?.routeRules?.["/_nuxt/**"]?.headers?.["cache-control"], "public, max-age=31536000, immutable");
-	assert.equal(config.nitro?.routeRules?.["/_nuxt/**"]?.headers?.["content-security-policy-report-only"], contentSecurityPolicyReportOnly);
+	assert.equal(config.nitro?.routeRules?.["/_nuxt/**"]?.headers?.["content-security-policy"], contentSecurityPolicy);
+	assert.equal(config.nitro?.routeRules?.["/**"]?.headers?.["content-security-policy-report-only"], undefined);
 	assert.equal(config.nitro?.routeRules?.["/_nuxt/**"]?.headers?.["cross-origin-opener-policy"], "same-origin");
 	assert.equal(config.nitro?.routeRules?.["/_nuxt/**"]?.headers?.["cross-origin-resource-policy"], "same-origin");
 	assert.equal(config.nitro?.routeRules?.["/_nuxt/**"]?.headers?.["origin-agent-cluster"], "?1");
@@ -214,4 +218,25 @@ test("new-tab links include opener isolation", () => {
 	});
 
 	assert.deepEqual(unsafeLinks, []);
+});
+
+test("public data links use the centralized safe-link boundary", () => {
+	const srcDirectory = fileURLToPath(new URL("../src", import.meta.url));
+	const allowedDirectBindings = new Set([
+		"components/ProtectedEmailLink.vue",
+		"components/SafeExternalLink.vue",
+		"pages/locations/[slug].vue",
+	]);
+	const directDynamicAnchorPattern = /<a\b[^>]*\b:href\s*=/u;
+	const unsafeBindings = collectVueFiles(srcDirectory).flatMap((path) => {
+		const relativePath = relative(srcDirectory, path);
+
+		if (allowedDirectBindings.has(relativePath))
+			return [];
+
+		const source = readFileSync(path, "utf8");
+		return directDynamicAnchorPattern.test(source) ? [relativePath] : [];
+	});
+
+	assert.deepEqual(unsafeBindings, []);
 });

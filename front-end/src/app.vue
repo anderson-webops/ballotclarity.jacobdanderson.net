@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { appDescription, appName } from "~/constants";
+import { serializeJsonLd } from "~/utils/json-ld";
 import { themeSchemeStyleContent } from "~/utils/theme-schemes";
 
 const noindexPathPattern = /^\/(?:admin|api|compare|plan|results|search)(?:\/|$)/;
@@ -45,7 +46,7 @@ useHead(() => ({
 	titleTemplate: title => title ? `${title} | ${appName}` : appName,
 	script: [
 		{
-			innerHTML: JSON.stringify(siteSchema),
+			innerHTML: serializeJsonLd(siteSchema),
 			key: "website-jsonld",
 			type: "application/ld+json"
 		}

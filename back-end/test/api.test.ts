@@ -9,6 +9,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
+import { createAdminLoginThrottle } from "../src/admin-login-throttle.js";
 import { createAdminMfaCode } from "../src/admin-mfa.js";
 import { defaultContentSeed } from "../src/admin-store.js";
 import {
@@ -55,6 +56,14 @@ function createTestAdminSessionToken(payload: Record<string, unknown>, sessionSe
 	const signature = createHmac("sha256", sessionSecret).update(encodedPayload).digest("hex");
 
 	return `${encodedPayload}.${signature}`;
+}
+
+function buildAdminLoginHeaders(forwardedFor: string) {
+	return {
+		"Content-Type": "application/json",
+		"x-admin-api-key": adminApiKey,
+		"x-forwarded-for": forwardedFor
+	};
 }
 
 function buildRepresentativeMatch({
@@ -1234,8 +1243,9 @@ test("GET /health returns readiness and coverage metadata", async () => {
 	const body = await response.json();
 
 	assert.equal(response.status, 200);
-	assert.match(response.headers.get("content-security-policy-report-only") ?? "", /default-src 'none'/);
-	assert.match(response.headers.get("content-security-policy-report-only") ?? "", /frame-ancestors 'none'/);
+	assert.match(response.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+	assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+	assert.equal(response.headers.get("content-security-policy-report-only"), null);
 	assert.equal(response.headers.get("cross-origin-opener-policy"), "same-origin");
 	assert.equal(response.headers.get("cross-origin-resource-policy"), "same-origin");
 	assert.equal(response.headers.get("origin-agent-cluster"), "?1");
@@ -1595,6 +1605,22 @@ test("POST /api/location validates incomplete numeric ZIP fragments", async () =
 	assert.match(body.message, /full 5-digit ZIP code/i);
 });
 
+test("POST /api/location rejects oversized and multi-line provider inputs", async () => {
+	for (const q of ["x".repeat(301), "55 Trinity Ave\nAtlanta"]) {
+		const response = await fetch(`${baseUrl}/api/location`, {
+			body: JSON.stringify({ q }),
+			headers: {
+				"Content-Type": "application/json"
+			},
+			method: "POST"
+		});
+		const body = await response.json();
+
+		assert.equal(response.status, 400);
+		assert.match(body.message, /300 characters or fewer|single line/u);
+	}
+});
+
 test("POST /api/location records resolved lookups through the ZIP lookup logger hook", async () => {
 	const recordedLookups: Array<{
 		guideAvailability?: string;
@@ -1761,6 +1787,42 @@ test("route lookup query enrichment shares the public lookup throttle", async ()
 		assert.equal(acceptedResponse.status, 200);
 		assert.equal(throttledResponse.status, 429);
 		assert.match(throttledBody.message, /too many civic lookup requests/i);
+		assert.ok(Number(throttledResponse.headers.get("retry-after")) > 0);
+	}
+	finally {
+		await new Promise<void>((resolve, reject) => {
+			isolatedServer.close(error => error ? reject(error) : resolve());
+		});
+	}
+});
+
+test("direct representative provider routes share the public lookup throttle", async () => {
+	const isolatedServer = (await createApp({
+		adminDbPath: ":memory:",
+		congressClient: null,
+		coverageRepository: buildTestCoverageRepository(),
+		googleCivicClient: null,
+		ldaClient: null,
+		openFecClient: null,
+		openStatesClient: null,
+		publicLookupThrottle: createPublicRequestThrottle({
+			maxRequests: 1,
+			windowMs: 60_000,
+		}),
+		zipLocationService: null,
+	})).listen(0, "127.0.0.1");
+	await once(isolatedServer, "listening");
+	const address = isolatedServer.address() as AddressInfo;
+	const isolatedBaseUrl = `http://127.0.0.1:${address.port}`;
+
+	try {
+		const acceptedResponse = await fetch(`${isolatedBaseUrl}/api/representatives/first-unknown-person`);
+		const throttledResponse = await fetch(`${isolatedBaseUrl}/api/representatives/second-unknown-person`);
+		const throttledBody = await throttledResponse.json();
+
+		assert.equal(acceptedResponse.status, 200);
+		assert.equal(throttledResponse.status, 429);
+		assert.match(throttledBody.message, /too many representative lookup requests/i);
 		assert.ok(Number(throttledResponse.headers.get("retry-after")) > 0);
 	}
 	finally {
@@ -2116,12 +2178,110 @@ test("GET /api/location/guess shares the public lookup throttle", async () => {
 	}
 });
 
+test("saved nationwide lookup routes share the public provider throttle", async () => {
+	const isolatedServer = (await createApp({
+		adminDbPath: ":memory:",
+		congressClient: null,
+		coverageRepository: buildTestCoverageRepository(),
+		googleCivicClient: null,
+		ldaClient: null,
+		openFecClient: null,
+		openStatesClient: null,
+		publicLookupThrottle: createPublicRequestThrottle({
+			maxRequests: 2,
+			windowMs: 60_000
+		}),
+		zipLocationService: {
+			async lookupZip(zipCode: string) {
+				return {
+					matches: [{
+						countyFips: "049",
+						countyName: "Utah County",
+						districtMatches: [{
+							districtCode: "3",
+							districtType: "congressional",
+							id: "congressional:3",
+							label: "Congressional District 3",
+							sourceSystem: "U.S. Census Geocoder"
+						}],
+						id: `zip:${zipCode}:provo-utah`,
+						latitude: 40.2338,
+						locality: "Provo",
+						longitude: -111.6585,
+						postalCode: zipCode,
+						representativeMatches: [],
+						sourceSystem: "Test ZIP provider",
+						stateAbbreviation: "UT",
+						stateName: "Utah"
+					}],
+					postalCode: zipCode
+				};
+			}
+		}
+	})).listen(0, "127.0.0.1");
+	await once(isolatedServer, "listening");
+	const isolatedAddress = isolatedServer.address() as AddressInfo;
+	const isolatedBaseUrl = `http://127.0.0.1:${isolatedAddress.port}`;
+
+	try {
+		const lookupResponse = await fetch(`${isolatedBaseUrl}/api/location`, {
+			body: JSON.stringify({ q: "84604" }),
+			headers: {
+				"Content-Type": "application/json"
+			},
+			method: "POST"
+		});
+		const cookie = lookupResponse.headers.get("set-cookie")?.split(";")[0] || "";
+		const firstSavedRoute = await fetch(`${isolatedBaseUrl}/api/districts`, {
+			headers: { cookie }
+		});
+		const throttledSavedRoute = await fetch(`${isolatedBaseUrl}/api/representatives`, {
+			headers: { cookie }
+		});
+		const throttledBody = await throttledSavedRoute.json();
+
+		assert.equal(lookupResponse.status, 200);
+		assert.ok(cookie);
+		assert.equal(firstSavedRoute.status, 200);
+		assert.equal(throttledSavedRoute.status, 429);
+		assert.match(throttledBody.message, /too many civic lookup requests/i);
+		assert.ok(Number(throttledSavedRoute.headers.get("retry-after")) > 0);
+	}
+	finally {
+		await new Promise<void>((resolve, reject) => {
+			isolatedServer.close(error => error ? reject(error) : resolve());
+		});
+	}
+});
+
 test("GET /api/location/guess returns 404 when configured proxy geo headers are unavailable", async () => {
 	const response = await fetch(`${baseUrl}/api/location/guess`);
 	const body = await response.json();
 
 	assert.equal(response.status, 404);
 	assert.match(body.message, /Automatic location guessing is not available/i);
+});
+
+test("GET /api/location/guess rejects malformed proxy geography", async () => {
+	const response = await fetch(`${baseUrl}/api/location/guess`, {
+		headers: {
+			"x-geo-city": "Provo",
+			"x-geo-country": "US",
+			"x-geo-postal-code": "not-a-zip"
+		}
+	});
+	const body = await response.json();
+
+	assert.equal(response.status, 404);
+	assert.match(body.message, /Automatic location guessing is not available/i);
+});
+
+test("GET /api/search rejects oversized queries before loading public records", async () => {
+	const response = await fetch(`${baseUrl}/api/search?q=${"x".repeat(201)}`);
+	const body = await response.json();
+
+	assert.equal(response.status, 400);
+	assert.match(body.message, /200 characters or fewer/i);
 });
 
 test("GET /api/location/guess returns 404 when automatic location guessing is disabled", async () => {
@@ -2271,9 +2431,11 @@ test("GET /api/corrections returns the public corrections log", async () => {
 	const coverageItem = body.corrections.find((item: { pageUrl?: string }) => item.pageUrl === "/coverage");
 
 	assert.equal(response.status, 200);
-	assert.equal(body.corrections.length, 3);
+	assert.equal(body.corrections.length, 2);
 	assert.ok(coverageItem);
 	assert.ok(body.corrections.some((item: { outcome: string }) => /launch state explicit/i.test(item.outcome)));
+	assert.ok(body.corrections.every((item: { status: string }) => item.status !== "new"));
+	assert.ok(body.corrections.every((item: { id: string }) => item.id !== "corr-003"));
 });
 
 test("GET /api/jurisdictions/:slug returns the official office and voting-method data", async () => {
@@ -3147,11 +3309,18 @@ test("admin corrections can link to content records and auto-link page submissio
 		});
 		const correctionsAfterSubmissionBody = await correctionsAfterSubmissionResponse.json();
 		const submittedCorrection = correctionsAfterSubmissionBody.corrections.find((item: { subject: string }) => item.subject === "Candidate profile correction");
+		const publicCorrectionsResponse = await fetch(`${isolatedBaseUrl}/api/corrections`);
+		const publicCorrectionsBody = await publicCorrectionsResponse.json();
 
 		assert.equal(submissionResponse.status, 201);
 		assert.equal(correctionsAfterSubmissionResponse.status, 200);
 		assert.equal(submittedCorrection?.contentId, "content-elena-torres");
 		assert.equal(submittedCorrection?.contentTitle, "Elena Torres profile");
+		assert.equal(submittedCorrection?.status, "new");
+		assert.equal(publicCorrectionsResponse.status, 200);
+		assert.ok(publicCorrectionsBody.corrections.every(
+			(item: { subject: string }) => item.subject !== "Candidate profile correction"
+		));
 	}
 	finally {
 		await new Promise<void>((resolve, reject) => {
@@ -3305,6 +3474,13 @@ test("PATCH /api/admin/content updates public content fields and publish gating"
 		"x-admin-actor-username": "ops-admin",
 		"x-admin-api-key": adminApiKey
 	};
+	const editorActorHeaders = {
+		"Content-Type": "application/json",
+		"x-admin-actor-display-name": "Review Editor",
+		"x-admin-actor-role": "editor",
+		"x-admin-actor-username": "review-editor",
+		"x-admin-api-key": adminApiKey
+	};
 
 	try {
 		const contentResponse = await fetch(`${isolatedBaseUrl}/api/admin/content`, {
@@ -3321,12 +3497,32 @@ test("PATCH /api/admin/content updates public content fields and publish gating"
 
 		const updatedSummary = "Updated public summary for production editorial testing.";
 		const updatedBallotSummary = "Updated short ballot summary for editorial control.";
-		const publishApprovedBy = "QA reviewer";
+		const publishApprovedBy = "Ops Admin";
 		const publishApprovalNote = "Verified source-backed summary and ballot-card copy before publish.";
+
+		const editorPublishResponse = await fetch(`${isolatedBaseUrl}/api/admin/content/content-elena-torres`, {
+			body: JSON.stringify({
+				publishApprovedBy,
+				publishApprovalNote,
+				published: true,
+				status: "published"
+			}),
+			headers: editorActorHeaders,
+			method: "PATCH"
+		});
+		const invalidStatusResponse = await fetch(`${isolatedBaseUrl}/api/admin/content/content-elena-torres`, {
+			body: JSON.stringify({
+				status: "approved"
+			}),
+			headers: adminActorHeaders,
+			method: "PATCH"
+		});
+
+		assert.equal(editorPublishResponse.status, 403);
+		assert.equal(invalidStatusResponse.status, 400);
 
 		const patchResponse = await fetch(`${isolatedBaseUrl}/api/admin/content/content-elena-torres`, {
 			body: JSON.stringify({
-				publishApprovedBy,
 				publishApprovalNote,
 				publicBallotSummary: updatedBallotSummary,
 				publicSummary: updatedSummary,
@@ -3353,6 +3549,25 @@ test("PATCH /api/admin/content updates public content fields and publish gating"
 		assert.equal(updatedElenaRecord?.publishApprovedBy, publishApprovedBy);
 		assert.equal(updatedElenaRecord?.publishApprovalNote, publishApprovalNote);
 		assert.equal(typeof updatedElenaRecord?.publishApprovedAt, "string");
+
+		const editorLiveEditResponse = await fetch(`${isolatedBaseUrl}/api/admin/content/content-elena-torres`, {
+			body: JSON.stringify({
+				publicSummary: "An editor must not be able to change live content."
+			}),
+			headers: editorActorHeaders,
+			method: "PATCH"
+		});
+		const editorUnpublishResponse = await fetch(`${isolatedBaseUrl}/api/admin/content/content-elena-torres`, {
+			body: JSON.stringify({
+				published: false,
+				status: "draft"
+			}),
+			headers: editorActorHeaders,
+			method: "PATCH"
+		});
+
+		assert.equal(editorLiveEditResponse.status, 403);
+		assert.equal(editorUnpublishResponse.status, 403);
 
 		const historyResponse = await fetch(`${isolatedBaseUrl}/api/admin/content/content-elena-torres/history`, {
 			headers: {
@@ -3408,7 +3623,21 @@ test("PATCH /api/admin/content updates public content fields and publish gating"
 		const republishWithoutApprovalBody = await republishWithoutApprovalResponse.json();
 
 		assert.equal(republishWithoutApprovalResponse.status, 400);
-		assert.match(republishWithoutApprovalBody.message, /Publish approval reviewer is required/i);
+		assert.match(republishWithoutApprovalBody.message, /Publish approval note is required/i);
+
+		const republishWithoutApprovalNoteResponse = await fetch(`${isolatedBaseUrl}/api/admin/content/content-elena-torres`, {
+			body: JSON.stringify({
+				publishApprovedBy,
+				published: true,
+				status: "published"
+			}),
+			headers: adminActorHeaders,
+			method: "PATCH"
+		});
+		const republishWithoutApprovalNoteBody = await republishWithoutApprovalNoteResponse.json();
+
+		assert.equal(republishWithoutApprovalNoteResponse.status, 400);
+		assert.match(republishWithoutApprovalNoteBody.message, /reviewer identity is recorded from the authenticated admin session/i);
 
 		const hiddenCandidateResponse = await fetch(`${isolatedBaseUrl}/api/candidates/elena-torres`);
 		const ballotResponse = await fetch(`${isolatedBaseUrl}/api/ballot?election=2026-fulton-county-general`);
@@ -3437,8 +3666,16 @@ test("PATCH /api/admin/content updates public content fields and publish gating"
 			headers: adminActorHeaders,
 			method: "POST"
 		});
+		const editorRollbackResponse = await fetch(`${isolatedBaseUrl}/api/admin/content/content-elena-torres/rollback`, {
+			body: JSON.stringify({
+				historyId: unpublishHistoryItem.id
+			}),
+			headers: editorActorHeaders,
+			method: "POST"
+		});
 
 		assert.equal(rollbackResponse.status, 200);
+		assert.equal(editorRollbackResponse.status, 403);
 
 		const rolledBackContentResponse = await fetch(`${isolatedBaseUrl}/api/admin/content`, {
 			headers: {
@@ -3544,6 +3781,13 @@ test("guide package workflow gates local guide publication from draft through ro
 		"x-admin-actor-username": "guide-admin",
 		"x-admin-api-key": adminApiKey
 	};
+	const editorActorHeaders = {
+		"Content-Type": "application/json",
+		"x-admin-actor-display-name": "Guide Editor",
+		"x-admin-actor-role": "editor",
+		"x-admin-actor-username": "guide-editor",
+		"x-admin-api-key": adminApiKey
+	};
 
 	try {
 		const lookupBeforeResponse = await fetch(`${isolatedBaseUrl}/api/location`, {
@@ -3598,9 +3842,20 @@ test("guide package workflow gates local guide publication from draft through ro
 		assert.equal(diagnosticsBody.diagnostics.recommendation.system, "publish_with_warnings");
 		assert.equal(diagnosticsBody.diagnostics.recommendation.final, "publish_with_warnings");
 
+		const spoofedReviewerResponse = await fetch(`${isolatedBaseUrl}/api/admin/packages/${packageId}`, {
+			body: JSON.stringify({
+				reviewer: "Someone Else"
+			}),
+			headers: adminActorHeaders,
+			method: "PATCH"
+		});
+		const spoofedReviewerBody = await spoofedReviewerResponse.json();
+
+		assert.equal(spoofedReviewerResponse.status, 400);
+		assert.match(spoofedReviewerBody.message, /authenticated admin session/i);
+
 		const readyBeforeReviewResponse = await fetch(`${isolatedBaseUrl}/api/admin/packages/${packageId}`, {
 			body: JSON.stringify({
-				reviewer: "Smoke Reviewer",
 				status: "ready_to_publish"
 			}),
 			headers: adminActorHeaders,
@@ -3615,7 +3870,6 @@ test("guide package workflow gates local guide publication from draft through ro
 			body: JSON.stringify({
 				reviewNotes: "Editorial review completed for the Fulton County package.",
 				reviewRecommendation: "publish_with_warnings",
-				reviewer: "Smoke Reviewer",
 				status: "in_review"
 			}),
 			headers: adminActorHeaders,
@@ -3626,11 +3880,11 @@ test("guide package workflow gates local guide publication from draft through ro
 		assert.equal(inReviewResponse.status, 200);
 		assert.equal(inReviewBody.package.workflow.reviewNotes, "Editorial review completed for the Fulton County package.");
 		assert.equal(inReviewBody.package.workflow.reviewRecommendation, "publish_with_warnings");
+		assert.equal(inReviewBody.package.workflow.reviewer, "Guide Admin");
 
 		const readyResponse = await fetch(`${isolatedBaseUrl}/api/admin/packages/${packageId}`, {
 			body: JSON.stringify({
 				reviewRecommendation: "publish_with_warnings",
-				reviewer: "Smoke Reviewer",
 				status: "ready_to_publish"
 			}),
 			headers: adminActorHeaders,
@@ -3639,12 +3893,20 @@ test("guide package workflow gates local guide publication from draft through ro
 
 		assert.equal(readyResponse.status, 200);
 
-		const publishResponse = await fetch(`${isolatedBaseUrl}/api/admin/packages/${packageId}/publish`, {
+		const editorPublishResponse = await fetch(`${isolatedBaseUrl}/api/admin/packages/${packageId}/publish`, {
 			body: JSON.stringify({
-				reviewNotes: "Published after passing all package checks.",
+				reviewNotes: "An editor must not be able to promote a package.",
 				reviewRecommendation: "publish_with_warnings",
 				reviewer: "Smoke Reviewer"
 			}),
+			headers: editorActorHeaders,
+			method: "POST"
+		});
+
+		assert.equal(editorPublishResponse.status, 403);
+
+		const publishResponse = await fetch(`${isolatedBaseUrl}/api/admin/packages/${packageId}/publish`, {
+			body: JSON.stringify({}),
 			headers: adminActorHeaders,
 			method: "POST"
 		});
@@ -3678,11 +3940,21 @@ test("guide package workflow gates local guide publication from draft through ro
 		assert.equal(compareAfterResponse.status, 200);
 		assert.equal(compareAfterBody.candidates.length, 0);
 
-		const unpublishResponse = await fetch(`${isolatedBaseUrl}/api/admin/packages/${packageId}/unpublish`, {
+		const editorUnpublishResponse = await fetch(`${isolatedBaseUrl}/api/admin/packages/${packageId}/unpublish`, {
 			body: JSON.stringify({
-				reviewNotes: "Rolled back after publication smoke test.",
+				reviewNotes: "An editor must not be able to demote a live package.",
 				reviewRecommendation: "needs_revision",
 				reviewer: "Smoke Reviewer"
+			}),
+			headers: editorActorHeaders,
+			method: "POST"
+		});
+
+		assert.equal(editorUnpublishResponse.status, 403);
+
+		const unpublishResponse = await fetch(`${isolatedBaseUrl}/api/admin/packages/${packageId}/unpublish`, {
+			body: JSON.stringify({
+				reason: "Rolled back after publication smoke test."
 			}),
 			headers: adminActorHeaders,
 			method: "POST"
@@ -3691,6 +3963,9 @@ test("guide package workflow gates local guide publication from draft through ro
 		const publicPackageAfterRollbackResponse = await fetch(`${isolatedBaseUrl}/api/guide-packages/${packageId}`);
 
 		assert.equal(unpublishResponse.status, 200);
+		const unpublishBody = await unpublishResponse.json();
+		assert.equal(unpublishBody.package.workflow.reviewRecommendation, "needs_revision");
+		assert.equal(unpublishBody.package.workflow.reviewer, "Guide Admin");
 		assert.equal(ballotAfterRollbackResponse.status, 404);
 		assert.equal(publicPackageAfterRollbackResponse.status, 404);
 
@@ -3730,20 +4005,55 @@ test("POST /api/admin/auth/login authenticates a configured user and throttles r
 	const isolatedBaseUrl = `http://127.0.0.1:${isolatedAddress.port}`;
 
 	try {
-		const successResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
+		const missingApiKeyResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
 			body: JSON.stringify({
 				password: "correct-horse-battery-staple",
 				username: "ops-admin"
 			}),
 			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.10"
+				"Content-Type": "application/json"
 			},
+			method: "POST"
+		});
+
+		assert.equal(missingApiKeyResponse.status, 401);
+
+		for (const body of [
+			{
+				password: "correct-horse-battery-staple",
+				username: "invalid username"
+			},
+			{
+				password: "x".repeat(257),
+				username: "ops-admin"
+			},
+			{
+				mfaCode: "12345x",
+				password: "correct-horse-battery-staple",
+				username: "ops-admin"
+			},
+		]) {
+			const invalidLoginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
+				body: JSON.stringify(body),
+				headers: buildAdminLoginHeaders("203.0.113.9"),
+				method: "POST"
+			});
+
+			assert.equal(invalidLoginResponse.status, 400);
+		}
+
+		const successResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
+			body: JSON.stringify({
+				password: "correct-horse-battery-staple",
+				username: "ops-admin"
+			}),
+			headers: buildAdminLoginHeaders("203.0.113.10"),
 			method: "POST"
 		});
 		const successBody = await successResponse.json();
 
 		assert.equal(successResponse.status, 200);
+		assert.equal(successResponse.headers.get("cache-control"), "no-store, private");
 		assert.equal(successBody.authenticated, true);
 		assert.equal(successBody.username, "ops-admin");
 
@@ -3753,10 +4063,7 @@ test("POST /api/admin/auth/login authenticates a configured user and throttles r
 					password: "wrong-password",
 					username: "ops-admin"
 				}),
-				headers: {
-					"Content-Type": "application/json",
-					"x-forwarded-for": `203.0.113.${10 + index}`
-				},
+				headers: buildAdminLoginHeaders(`203.0.113.${10 + index}`),
 				method: "POST"
 			});
 
@@ -3768,10 +4075,7 @@ test("POST /api/admin/auth/login authenticates a configured user and throttles r
 				password: "wrong-password",
 				username: "ops-admin"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "198.51.100.200"
-			},
+			headers: buildAdminLoginHeaders("198.51.100.200"),
 			method: "POST"
 		});
 		const throttledBody = await throttledResponse.json();
@@ -3779,6 +4083,175 @@ test("POST /api/admin/auth/login authenticates a configured user and throttles r
 		assert.equal(throttledResponse.status, 429);
 		assert.match(throttledBody.message, /Too many failed admin login attempts/i);
 		assert.ok(Number(throttledResponse.headers.get("retry-after")) >= 1);
+	}
+	finally {
+		await new Promise<void>((resolve, reject) => {
+			isolatedServer.close(error => error ? reject(error) : resolve());
+		});
+	}
+});
+
+test("admin password verification throttles repeated current-password failures", async () => {
+	const adminSessionSecret = "test-admin-session-secret-that-is-long-enough";
+	const isolatedServer = (await createApp({
+		adminApiKey,
+		adminDbPath: ":memory:",
+		adminLoginThrottle: createAdminLoginThrottle({
+			accountMaxAttempts: 2,
+			ipMaxAttempts: 10,
+			lockoutMs: 60_000,
+			windowMs: 60_000,
+		}),
+		adminSessionSecret,
+		bootstrapDisplayName: "Operations Admin",
+		bootstrapPassword: "correct-horse-battery-staple",
+		bootstrapUsername: "ops-admin",
+	})).listen(0, "127.0.0.1");
+
+	await once(isolatedServer, "listening");
+	const isolatedAddress = isolatedServer.address() as AddressInfo;
+	const isolatedBaseUrl = `http://127.0.0.1:${isolatedAddress.port}`;
+
+	try {
+		const loginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
+			body: JSON.stringify({
+				password: "correct-horse-battery-staple",
+				username: "ops-admin",
+			}),
+			headers: buildAdminLoginHeaders("203.0.113.50"),
+			method: "POST",
+		});
+		const loginBody = await loginResponse.json();
+		const adminHeaders = {
+			"Content-Type": "application/json",
+			"x-admin-api-key": adminApiKey,
+			"x-admin-session-token": createTestAdminSessionToken({
+				credentialsUpdatedAt: loginBody.credentialsUpdatedAt,
+				displayName: loginBody.displayName,
+				expiresAt: Date.now() + 60_000,
+				role: loginBody.role,
+				username: loginBody.username,
+			}, adminSessionSecret),
+		};
+
+		assert.equal(loginResponse.status, 200);
+
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const failureResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/password`, {
+				body: JSON.stringify({
+					currentPassword: "wrong-current-password",
+					newPassword: "replacement-password-value",
+					username: "ops-admin",
+				}),
+				headers: adminHeaders,
+				method: "POST",
+			});
+
+			assert.equal(failureResponse.status, 401);
+		}
+
+		const blockedValidResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/password`, {
+			body: JSON.stringify({
+				currentPassword: "correct-horse-battery-staple",
+				newPassword: "replacement-password-value",
+				username: "ops-admin",
+			}),
+			headers: adminHeaders,
+			method: "POST",
+		});
+		const blockedValidBody = await blockedValidResponse.json();
+
+		assert.equal(blockedValidResponse.status, 429);
+		assert.match(blockedValidBody.message, /too many failed admin verification attempts/i);
+		assert.ok(Number(blockedValidResponse.headers.get("retry-after")) >= 1);
+	}
+	finally {
+		await new Promise<void>((resolve, reject) => {
+			isolatedServer.close(error => error ? reject(error) : resolve());
+		});
+	}
+});
+
+test("admin MFA verification throttles repeated current-password failures", async () => {
+	const adminSessionSecret = "test-admin-session-secret-that-is-long-enough";
+	const isolatedServer = (await createApp({
+		adminApiKey,
+		adminDbPath: ":memory:",
+		adminLoginThrottle: createAdminLoginThrottle({
+			accountMaxAttempts: 2,
+			ipMaxAttempts: 10,
+			lockoutMs: 60_000,
+			windowMs: 60_000,
+		}),
+		adminSessionSecret,
+		bootstrapDisplayName: "Operations Admin",
+		bootstrapPassword: "correct-horse-battery-staple",
+		bootstrapUsername: "ops-admin",
+	})).listen(0, "127.0.0.1");
+
+	await once(isolatedServer, "listening");
+	const isolatedAddress = isolatedServer.address() as AddressInfo;
+	const isolatedBaseUrl = `http://127.0.0.1:${isolatedAddress.port}`;
+
+	try {
+		const loginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
+			body: JSON.stringify({
+				password: "correct-horse-battery-staple",
+				username: "ops-admin",
+			}),
+			headers: buildAdminLoginHeaders("203.0.113.51"),
+			method: "POST",
+		});
+		const loginBody = await loginResponse.json();
+		const adminHeaders = {
+			"Content-Type": "application/json",
+			"x-admin-api-key": adminApiKey,
+			"x-admin-session-token": createTestAdminSessionToken({
+				credentialsUpdatedAt: loginBody.credentialsUpdatedAt,
+				displayName: loginBody.displayName,
+				expiresAt: Date.now() + 60_000,
+				role: loginBody.role,
+				username: loginBody.username,
+			}, adminSessionSecret),
+		};
+		const setupResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/mfa/setup`, {
+			body: JSON.stringify({ username: "ops-admin" }),
+			headers: adminHeaders,
+			method: "POST",
+		});
+		const setupBody = await setupResponse.json();
+
+		assert.equal(loginResponse.status, 200);
+		assert.equal(setupResponse.status, 200);
+
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const failureResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/mfa/enable`, {
+				body: JSON.stringify({
+					currentPassword: "wrong-current-password",
+					mfaCode: createAdminMfaCode(setupBody.secret),
+					secret: setupBody.secret,
+					username: "ops-admin",
+				}),
+				headers: adminHeaders,
+				method: "POST",
+			});
+
+			assert.equal(failureResponse.status, 400);
+		}
+
+		const blockedValidResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/mfa/enable`, {
+			body: JSON.stringify({
+				currentPassword: "correct-horse-battery-staple",
+				mfaCode: createAdminMfaCode(setupBody.secret),
+				secret: setupBody.secret,
+				username: "ops-admin",
+			}),
+			headers: adminHeaders,
+			method: "POST",
+		});
+
+		assert.equal(blockedValidResponse.status, 429);
+		assert.ok(Number(blockedValidResponse.headers.get("retry-after")) >= 1);
 	}
 	finally {
 		await new Promise<void>((resolve, reject) => {
@@ -3827,7 +4300,10 @@ test("admin API requires a current signed session and enforces trusted roles", a
 		adminSessionSecret,
 		bootstrapDisplayName: "Operations Admin",
 		bootstrapPassword: "correct-horse-battery-staple",
-		bootstrapUsername: "ops-admin"
+		bootstrapUsername: "ops-admin",
+		contentSeed,
+		correctionSeed,
+		sourceMonitorSeed
 	})).listen(0, "127.0.0.1");
 
 	await once(isolatedServer, "listening");
@@ -3840,10 +4316,7 @@ test("admin API requires a current signed session and enforces trusted roles", a
 				password: "correct-horse-battery-staple",
 				username: "ops-admin"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.30"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.30"),
 			method: "POST"
 		});
 		const loginBody = await loginResponse.json();
@@ -3915,6 +4388,65 @@ test("admin API requires a current signed session and enforces trusted roles", a
 		assert.equal(usersResponse.status, 200);
 		assert.ok(adminUser?.id);
 
+		const mfaRequiredResponse = await fetch(`${isolatedBaseUrl}/api/admin/users`, {
+			body: JSON.stringify({
+				displayName: "Blocked Before MFA",
+				password: "blocked-before-mfa-password",
+				role: "editor",
+				username: "blocked-before-mfa"
+			}),
+			headers: adminHeaders,
+			method: "POST"
+		});
+		const mfaRequiredBody = await mfaRequiredResponse.json();
+
+		assert.equal(mfaRequiredResponse.status, 403);
+		assert.match(mfaRequiredBody.message, /multi-factor authentication/i);
+
+		const correctionMfaRequiredResponse = await fetch(`${isolatedBaseUrl}/api/admin/corrections/corr-003`, {
+			body: JSON.stringify({
+				status: "triaged"
+			}),
+			headers: adminHeaders,
+			method: "PATCH"
+		});
+
+		assert.equal(correctionMfaRequiredResponse.status, 403);
+
+		const mfaSetupResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/mfa/setup`, {
+			body: JSON.stringify({
+				username: "ops-admin"
+			}),
+			headers: adminHeaders,
+			method: "POST"
+		});
+		const mfaSetupBody = await mfaSetupResponse.json();
+		const mfaCode = createAdminMfaCode(mfaSetupBody.secret);
+		const mfaEnableResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/mfa/enable`, {
+			body: JSON.stringify({
+				currentPassword: "correct-horse-battery-staple",
+				mfaCode,
+				secret: mfaSetupBody.secret,
+				username: "ops-admin"
+			}),
+			headers: adminHeaders,
+			method: "POST"
+		});
+		const mfaEnableBody = await mfaEnableResponse.json();
+
+		assert.equal(mfaSetupResponse.status, 200);
+		assert.equal(mfaEnableResponse.status, 200);
+		assert.ok(mfaEnableBody.mfaEnabledAt);
+
+		adminHeaders["x-admin-session-token"] = createTestAdminSessionToken({
+			credentialsUpdatedAt: mfaEnableBody.credentialsUpdatedAt,
+			displayName: mfaEnableBody.displayName,
+			expiresAt: Date.now() + 60_000,
+			mfaEnabledAt: mfaEnableBody.mfaEnabledAt,
+			role: mfaEnableBody.role,
+			username: mfaEnableBody.username
+		}, adminSessionSecret);
+
 		const missingRoleResponse = await fetch(`${isolatedBaseUrl}/api/admin/users`, {
 			body: JSON.stringify({
 				displayName: "Missing Role",
@@ -3942,16 +4474,42 @@ test("admin API requires a current signed session and enforces trusted roles", a
 
 		assert.equal(createEditorResponse.status, 201);
 		assert.ok(editor?.id);
+		assert.ok(editor.passwordChangeRequiredAt);
+
+		const correctionPublishResponse = await fetch(`${isolatedBaseUrl}/api/admin/corrections/corr-003`, {
+			body: JSON.stringify({
+				nextStep: "Reviewed for safe publication.",
+				status: "triaged"
+			}),
+			headers: adminHeaders,
+			method: "PATCH"
+		});
+		const publicCorrectionsResponse = await fetch(`${isolatedBaseUrl}/api/corrections`);
+		const publicCorrectionsBody = await publicCorrectionsResponse.json();
+
+		assert.equal(correctionPublishResponse.status, 200);
+		assert.ok(publicCorrectionsBody.corrections.some(
+			(item: { id: string }) => item.id === "corr-003"
+		));
+		assert.doesNotMatch(JSON.stringify(publicCorrectionsBody), /hello@ballotclarity\.org/i);
+
+		const sourceUpdateResponse = await fetch(`${isolatedBaseUrl}/api/admin/sources/${sourceMonitorSeed[0]!.id}`, {
+			body: JSON.stringify({
+				health: "review-soon",
+				note: "MFA-protected source review completed."
+			}),
+			headers: adminHeaders,
+			method: "PATCH"
+		});
+
+		assert.equal(sourceUpdateResponse.status, 200);
 
 		const editorLoginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
 			body: JSON.stringify({
 				password: "review-editor-password",
 				username: "review-editor"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.31"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.31"),
 			method: "POST"
 		});
 		const editorLoginBody = await editorLoginResponse.json();
@@ -3959,6 +4517,7 @@ test("admin API requires a current signed session and enforces trusted roles", a
 			credentialsUpdatedAt: editorLoginBody.credentialsUpdatedAt,
 			displayName: editorLoginBody.displayName,
 			expiresAt: Date.now() + 60_000,
+			passwordChangeRequiredAt: editorLoginBody.passwordChangeRequiredAt,
 			role: editorLoginBody.role,
 			username: editorLoginBody.username
 		}, adminSessionSecret);
@@ -3971,6 +4530,7 @@ test("admin API requires a current signed session and enforces trusted roles", a
 		};
 
 		assert.equal(editorLoginResponse.status, 200);
+		assert.equal(editorLoginBody.passwordChangeRequiredAt, editor.passwordChangeRequiredAt);
 
 		const editorOverviewResponse = await fetch(`${isolatedBaseUrl}/api/admin/overview`, {
 			headers: editorHeaders
@@ -3981,10 +4541,76 @@ test("admin API requires a current signed session and enforces trusted roles", a
 		const editorAuditResponse = await fetch(`${isolatedBaseUrl}/api/admin/audit`, {
 			headers: editorHeaders
 		});
+		const blockedTemporaryWriteResponse = await fetch(`${isolatedBaseUrl}/api/admin/corrections/corr-003`, {
+			body: JSON.stringify({
+				nextStep: "A temporary-password session must not change admin data."
+			}),
+			headers: {
+				...editorHeaders,
+				"Content-Type": "application/json"
+			},
+			method: "PATCH"
+		});
+		const blockedTemporaryWriteBody = await blockedTemporaryWriteResponse.json();
 
 		assert.equal(editorOverviewResponse.status, 200);
 		assert.equal(editorUsersResponse.status, 403);
 		assert.equal(editorAuditResponse.status, 403);
+		assert.equal(blockedTemporaryWriteResponse.status, 403);
+		assert.match(blockedTemporaryWriteBody.message, /password change required/i);
+
+		const editorPasswordChangeResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/password`, {
+			body: JSON.stringify({
+				currentPassword: "review-editor-password",
+				newPassword: "editor-selected-password",
+				username: "review-editor"
+			}),
+			headers: {
+				...editorHeaders,
+				"Content-Type": "application/json"
+			},
+			method: "POST"
+		});
+		const editorPasswordChangeBody = await editorPasswordChangeResponse.json();
+
+		assert.equal(editorPasswordChangeResponse.status, 200);
+		assert.equal(editorPasswordChangeBody.passwordChangeRequiredAt, undefined);
+
+		editorHeaders["x-admin-session-token"] = createTestAdminSessionToken({
+			credentialsUpdatedAt: editorPasswordChangeBody.credentialsUpdatedAt,
+			displayName: editorPasswordChangeBody.displayName,
+			expiresAt: Date.now() + 60_000,
+			role: editorPasswordChangeBody.role,
+			username: editorPasswordChangeBody.username
+		}, adminSessionSecret);
+
+		const draftContent = contentSeed.find(item => !item.published);
+
+		assert.ok(draftContent);
+
+		const editorDraftUpdateResponse = await fetch(`${isolatedBaseUrl}/api/admin/content/${draftContent.id}`, {
+			body: JSON.stringify({
+				assignedTo: "Review Editor"
+			}),
+			headers: {
+				...editorHeaders,
+				"Content-Type": "application/json"
+			},
+			method: "PATCH"
+		});
+		const editorPublicCorrectionResponse = await fetch(`${isolatedBaseUrl}/api/admin/corrections/corr-003`, {
+			body: JSON.stringify({
+				nextStep: "An editor must not change a live public correction."
+			}),
+			headers: {
+				...editorHeaders,
+				"Content-Type": "application/json"
+			},
+			method: "PATCH"
+		});
+
+		assert.equal(editorDraftUpdateResponse.status, 200);
+		assert.equal(editorPublicCorrectionResponse.status, 403);
 
 		const roleMutationResponse = await fetch(`${isolatedBaseUrl}/api/admin/users/${editor.id}`, {
 			body: JSON.stringify({ role: "admin" }),
@@ -4021,10 +4647,20 @@ test("admin API requires a current signed session and enforces trusted roles", a
 		const passwordResetEvent = auditBody.events.find(
 			(event: { eventType: string }) => event.eventType === "admin_user_password_reset"
 		);
+		const sourceUpdateEvent = auditBody.events.find(
+			(event: { eventType: string }) => event.eventType === "source_monitor_update"
+		);
+		const correctionPublishEvent = auditBody.events.find(
+			(event: { eventType: string }) => event.eventType === "correction_publish"
+		);
 
 		assert.equal(auditResponse.status, 200);
 		assert.equal(passwordResetEvent?.actorUsername, "ops-admin");
 		assert.equal(passwordResetEvent?.targetLabel, "Review Editor");
+		assert.equal(sourceUpdateEvent?.actorUsername, "ops-admin");
+		assert.equal(sourceUpdateEvent?.targetId, sourceMonitorSeed[0]!.id);
+		assert.equal(correctionPublishEvent?.actorUsername, "ops-admin");
+		assert.equal(correctionPublishEvent?.targetId, "corr-003");
 	}
 	finally {
 		await new Promise<void>((resolve, reject) => {
@@ -4094,6 +4730,19 @@ test("admin MFA setup enforces verification codes and supports disable and reset
 		assert.equal(setupBody.username, "ops-admin");
 		assert.match(setupBody.otpauthUrl, /^otpauth:\/\/totp\//);
 
+		const invalidSecretEnableResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/mfa/enable`, {
+			body: JSON.stringify({
+				currentPassword: "correct-horse-battery-staple",
+				mfaCode: firstCode,
+				secret: `${setupBody.secret}!`,
+				username: "ops-admin"
+			}),
+			headers: adminHeaders,
+			method: "POST"
+		});
+
+		assert.equal(invalidSecretEnableResponse.status, 400);
+
 		const wrongPasswordEnableResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/mfa/enable`, {
 			body: JSON.stringify({
 				currentPassword: "wrong-password",
@@ -4137,10 +4786,7 @@ test("admin MFA setup enforces verification codes and supports disable and reset
 				password: "correct-horse-battery-staple",
 				username: "ops-admin"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.40"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.40"),
 			method: "POST"
 		});
 		const challengeBody = await challengeResponse.json();
@@ -4155,10 +4801,7 @@ test("admin MFA setup enforces verification codes and supports disable and reset
 				password: "correct-horse-battery-staple",
 				username: "ops-admin"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.41"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.41"),
 			method: "POST"
 		});
 
@@ -4170,10 +4813,7 @@ test("admin MFA setup enforces verification codes and supports disable and reset
 				password: "correct-horse-battery-staple",
 				username: "ops-admin"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.42"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.42"),
 			method: "POST"
 		});
 		const validMfaLoginBody = await validMfaLoginResponse.json();
@@ -4296,10 +4936,7 @@ test("admin MFA setup enforces verification codes and supports disable and reset
 				password: "correct-horse-battery-staple",
 				username: "ops-admin"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.43"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.43"),
 			method: "POST"
 		});
 		const resetLoginBody = await resetLoginResponse.json();
@@ -4391,6 +5028,7 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 		assert.ok(editor?.id);
 		assert.ok(editor.credentialsUpdatedAt);
 		assert.equal(editor.disabledAt, undefined);
+		assert.ok(editor.passwordChangeRequiredAt);
 
 		const editorHeaders = {
 			"Content-Type": "application/json",
@@ -4405,10 +5043,7 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 				password: "review-editor-password",
 				username: "review-editor"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.20"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.20"),
 			method: "POST"
 		});
 
@@ -4425,6 +5060,14 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 		assert.equal(activeSessionBody.authenticated, true);
 		assert.equal(activeSessionBody.username, "review-editor");
 
+		const malformedSessionResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/session/review-editor?credentialsUpdatedAt=not-a-timestamp`, {
+			headers: {
+				"x-admin-api-key": adminApiKey
+			}
+		});
+
+		assert.equal(malformedSessionResponse.status, 400);
+
 		const disableEditorResponse = await fetch(`${isolatedBaseUrl}/api/admin/users/${editor.id}`, {
 			body: JSON.stringify({ disabled: true }),
 			headers: adminHeaders,
@@ -4435,16 +5078,14 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 
 		assert.equal(disableEditorResponse.status, 200);
 		assert.ok(disabledEditor.disabledAt);
+		assert.notEqual(disabledEditor.credentialsUpdatedAt, editor.credentialsUpdatedAt);
 
 		const blockedEditorLoginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
 			body: JSON.stringify({
 				password: "review-editor-password",
 				username: "review-editor"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.21"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.21"),
 			method: "POST"
 		});
 
@@ -4470,21 +5111,28 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 
 		assert.equal(restoreEditorResponse.status, 200);
 		assert.equal(restoredEditor.disabledAt, undefined);
-		assert.equal(restoredEditor.credentialsUpdatedAt, editor.credentialsUpdatedAt);
+		assert.notEqual(restoredEditor.credentialsUpdatedAt, disabledEditor.credentialsUpdatedAt);
+
+		const preDisableSessionAfterRestoreResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/session/review-editor?credentialsUpdatedAt=${encodeURIComponent(editor.credentialsUpdatedAt)}`, {
+			headers: {
+				"x-admin-api-key": adminApiKey
+			}
+		});
+
+		assert.equal(preDisableSessionAfterRestoreResponse.status, 401);
 
 		const restoredEditorLoginResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/login`, {
 			body: JSON.stringify({
 				password: "review-editor-password",
 				username: "review-editor"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.22"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.22"),
 			method: "POST"
 		});
+		const restoredEditorLoginBody = await restoredEditorLoginResponse.json();
 
 		assert.equal(restoredEditorLoginResponse.status, 200);
+		assert.equal(restoredEditorLoginBody.credentialsUpdatedAt, restoredEditor.credentialsUpdatedAt);
 
 		const shortPasswordResetResponse = await fetch(`${isolatedBaseUrl}/api/admin/users/${editor.id}`, {
 			body: JSON.stringify({ password: "short" }),
@@ -4507,8 +5155,10 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 		assert.equal(resetPasswordResponse.status, 200);
 		assert.ok(resetEditor.credentialsUpdatedAt);
 		assert.notEqual(resetEditor.credentialsUpdatedAt, editor.credentialsUpdatedAt);
+		assert.ok(resetEditor.passwordChangeRequiredAt);
+		assert.notEqual(resetEditor.passwordChangeRequiredAt, editor.passwordChangeRequiredAt);
 
-		const staleCredentialSessionResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/session/review-editor?credentialsUpdatedAt=${encodeURIComponent(editor.credentialsUpdatedAt)}`, {
+		const staleCredentialSessionResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/session/review-editor?credentialsUpdatedAt=${encodeURIComponent(restoredEditor.credentialsUpdatedAt)}`, {
 			headers: {
 				"x-admin-api-key": adminApiKey
 			}
@@ -4523,10 +5173,7 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 				password: "review-editor-password",
 				username: "review-editor"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.23"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.23"),
 			method: "POST"
 		});
 
@@ -4537,16 +5184,14 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 				password: "new-review-editor-password",
 				username: "review-editor"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.24"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.24"),
 			method: "POST"
 		});
 		const newPasswordLoginBody = await newPasswordLoginResponse.json();
 
 		assert.equal(newPasswordLoginResponse.status, 200);
 		assert.equal(newPasswordLoginBody.credentialsUpdatedAt, resetEditor.credentialsUpdatedAt);
+		assert.equal(newPasswordLoginBody.passwordChangeRequiredAt, resetEditor.passwordChangeRequiredAt);
 
 		const freshCredentialSessionResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/session/review-editor?credentialsUpdatedAt=${encodeURIComponent(resetEditor.credentialsUpdatedAt)}`, {
 			headers: {
@@ -4557,6 +5202,7 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 
 		assert.equal(freshCredentialSessionResponse.status, 200);
 		assert.equal(freshCredentialSessionBody.authenticated, true);
+		assert.equal(freshCredentialSessionBody.passwordChangeRequiredAt, resetEditor.passwordChangeRequiredAt);
 
 		const wrongCurrentPasswordChangeResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/password`, {
 			body: JSON.stringify({
@@ -4569,6 +5215,18 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 		});
 
 		assert.equal(wrongCurrentPasswordChangeResponse.status, 401);
+
+		const oversizedCurrentPasswordChangeResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/password`, {
+			body: JSON.stringify({
+				currentPassword: "x".repeat(257),
+				newPassword: "self-service-editor-password",
+				username: "review-editor"
+			}),
+			headers: editorHeaders,
+			method: "POST"
+		});
+
+		assert.equal(oversizedCurrentPasswordChangeResponse.status, 400);
 
 		const shortSelfChangeResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/password`, {
 			body: JSON.stringify({
@@ -4599,6 +5257,7 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 		assert.equal(selfChangeBody.authenticated, true);
 		assert.equal(selfChangeBody.username, "review-editor");
 		assert.notEqual(selfChangeBody.credentialsUpdatedAt, resetEditor.credentialsUpdatedAt);
+		assert.equal(selfChangeBody.passwordChangeRequiredAt, undefined);
 
 		const resetCredentialSessionResponse = await fetch(`${isolatedBaseUrl}/api/admin/auth/session/review-editor?credentialsUpdatedAt=${encodeURIComponent(resetEditor.credentialsUpdatedAt)}`, {
 			headers: {
@@ -4613,10 +5272,7 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 				password: "new-review-editor-password",
 				username: "review-editor"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.25"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.25"),
 			method: "POST"
 		});
 
@@ -4627,10 +5283,7 @@ test("admin user lifecycle blocks self-administration and invalidates reset cred
 				password: "self-service-editor-password",
 				username: "review-editor"
 			}),
-			headers: {
-				"Content-Type": "application/json",
-				"x-forwarded-for": "203.0.113.26"
-			},
+			headers: buildAdminLoginHeaders("203.0.113.26"),
 			method: "POST"
 		});
 		const selfChangedLoginBody = await selfChangedLoginResponse.json();

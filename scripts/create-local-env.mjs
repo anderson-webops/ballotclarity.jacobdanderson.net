@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 
@@ -15,7 +15,7 @@ if (existsSync(envPath) && !force) {
 }
 
 const postgresUser = "postgres";
-const postgresPassword = "postgres";
+const postgresPassword = randomSecret(18);
 const postgresDb = "ballot_clarity";
 const postgresPort = "5432";
 const minioRootUser = "minioadmin";
@@ -35,11 +35,14 @@ NUXT_PUBLIC_API_BASE=http://127.0.0.1:3001/api
 POSTGRES_DB=${postgresDb}
 POSTGRES_USER=${postgresUser}
 POSTGRES_PASSWORD=${postgresPassword}
+POSTGRES_BIND_ADDRESS=127.0.0.1
 POSTGRES_PORT=${postgresPort}
 MINIO_ROOT_USER=${minioRootUser}
 MINIO_ROOT_PASSWORD=${minioRootPassword}
 MINIO_BUCKET=${minioBucket}
+MINIO_BIND_ADDRESS=127.0.0.1
 MINIO_PORT=${minioPort}
+MINIO_CONSOLE_BIND_ADDRESS=127.0.0.1
 MINIO_CONSOLE_PORT=${minioConsolePort}
 
 # Server-only admin bridge values
@@ -87,6 +90,7 @@ LIVE_COVERAGE_FILE=./data/live-coverage.local.json
 LIVE_COVERAGE_REQUIRED=false
 
 # Back-end runtime
+HOST=127.0.0.1
 PORT=3001
 TRUST_PROXY=false
 LOG_LEVEL=info
@@ -97,4 +101,5 @@ ADMIN_LOGIN_LOCKOUT_MS=1800000
 `;
 
 writeFileSync(envPath, content, "utf8");
+chmodSync(envPath, 0o600);
 console.log(`Created local .env at ${envPath}. Fill GOOGLE_CIVIC_API_KEY before testing live address verification.`);

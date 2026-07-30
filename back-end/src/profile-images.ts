@@ -1,25 +1,16 @@
 import type { CongressMemberDetail } from "./congress.js";
 import type { ProfileImage } from "./types/civic.js";
+import { normalizePublicHref } from "./public-href.js";
 
 const htmlTagPattern = /<[^>]*>/g;
 
 function normalizeImageUrl(value: string | null | undefined) {
-	const trimmed = value?.trim();
+	const normalized = normalizePublicHref(value);
 
-	if (!trimmed)
+	if (!normalized || normalized.startsWith("#"))
 		return undefined;
 
-	try {
-		const url = new URL(trimmed);
-
-		if (url.protocol !== "https:" && url.protocol !== "http:")
-			return undefined;
-
-		return url.toString();
-	}
-	catch {
-		return undefined;
-	}
+	return normalized;
 }
 
 export function normalizeProfileImageAttribution(value: string | null | undefined) {

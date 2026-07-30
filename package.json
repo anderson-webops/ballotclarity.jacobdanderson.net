@@ -20,6 +20,7 @@
 		"postinstall": "npm run -w front-end prepare",
 		"audit": "node scripts/security-audit.mjs",
 		"audit:raw": "npm audit --workspaces",
+		"audit:production": "npm audit --workspaces --omit=dev",
 		"audit-fix": "npm audit fix --workspaces",
 		"build": "npm run -w front-end build && npm run -w back-end build",
 		"db:down": "docker compose down",
@@ -45,6 +46,8 @@
 		"providers:test:src": "npm run -w back-end providers:test:src",
 		"local:setup": "node ./scripts/setup-local-provider.mjs",
 		"verify:local": "node ./scripts/verify-local-runtime.mjs",
+		"verify:backend-lockfile": "npm ci --prefix back-end --workspaces=false --include=optional --strict-allow-scripts",
+		"verify:native-bindings": "node ./scripts/verify-native-bindings.mjs",
 		"verify:production": "node ./scripts/production-config-check.mjs",
 		"verify:production:fixture": "node ./scripts/verify-production-config-fixture.mjs",
 		"verify:analytics": "npm run -w front-end verify:analytics",
@@ -63,8 +66,11 @@
 		"lint": "npm run -w front-end lint && npm run -w back-end lint",
 		"lint-fix": "npm run -w front-end lint-fix && npm run -w back-end lint-fix",
 		"typecheck": "npm run -w front-end typecheck && npm run -w back-end typecheck",
-		"clean": "rm -rf node_modules package-lock.json front-end/.nuxt front-end/.output front-end/node_modules front-end/package-lock.json back-end/dist back-end/node_modules back-end/package-lock.json",
+		"clean": "rm -rf node_modules front-end/.nuxt front-end/.output front-end/node_modules back-end/dist back-end/node_modules back-end/tsconfig.tsbuildinfo",
 		"a11y": "tsx scripts/a11y-smoke.mjs"
+	},
+	"dependencies": {
+		"archiver": "file:vendor/archiver-nitro-compat"
 	},
 	"devDependencies": {
 		"@antfu/eslint-config": "^8.3.0",
@@ -72,6 +78,7 @@
 		"@typescript-eslint/parser": "^8.61.0",
 		"@unocss/eslint-plugin": "^66.7.2",
 		"axe-core": "^4.12.1",
+		"commander": "15.0.0",
 		"eslint": "^10.4.1",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-prettier": "^5.5.6",
@@ -91,9 +98,11 @@
 			".": "^8.1.0",
 			"esbuild": "^0.28.1"
 		},
-		"nitropack": "2.13.4",
+		"nitropack": {
+			".": "2.13.4",
+			"archiver": "$archiver"
+		},
 		"simple-git": "3.36.0",
-		"brace-expansion": "5.0.8",
 		"fast-uri": "3.1.4",
 		"postcss": "8.5.24",
 		"shell-quote": "1.10.0",
@@ -102,7 +111,6 @@
 		"valibot": "1.4.2"
 	},
 	"allowScripts": {
-		"esbuild@0.27.7": true,
 		"esbuild@0.28.1": true,
 		"@parcel/watcher@2.5.6": true,
 		"unrs-resolver@1.12.2": true,

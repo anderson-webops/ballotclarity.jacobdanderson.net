@@ -57,9 +57,9 @@ usePageSeo({
 					{{ data.source.publisher }} · {{ data.source.sourceSystem }}
 				</p>
 				<div class="mt-6 flex flex-wrap gap-3">
-					<a v-if="data.source.url" :href="data.source.url" target="_blank" rel="noopener noreferrer" class="btn-primary">
+					<SafeExternalLink v-if="data.source.url" :href="data.source.url" class="btn-primary">
 						{{ data.source.primarySourceLabel || "Open primary source" }}
-					</a>
+					</SafeExternalLink>
 					<NuxtLink to="/sources" class="btn-secondary">
 						Back to directory
 					</NuxtLink>

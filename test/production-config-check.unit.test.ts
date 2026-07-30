@@ -116,33 +116,55 @@ function buildProductionEnv(overrides: Record<string, string | undefined> = {}) 
 	return {
 		ACTIVE_LOOKUP_COOKIE_SECRET: "d".repeat(48),
 		ADDRESS_CACHE_ENCRYPTION_KEY: "e".repeat(48),
+		ADDRESS_CACHE_MAX_ROWS: "100000",
 		ADMIN_API_BASE: "http://127.0.0.1:3001/api",
+		ADMIN_API_FETCH_TIMEOUT_MS: "15000",
 		ADMIN_API_KEY: "a".repeat(48),
 		ADMIN_DATABASE_URL: "postgres://ballotclarity:secret@db.internal:5432/ballotclarity",
 		ADMIN_LOGIN_LOCKOUT_MS: "1800000",
 		ADMIN_LOGIN_IP_MAX_ATTEMPTS: "25",
 		ADMIN_LOGIN_MAX_ATTEMPTS: "5",
+		ADMIN_LOGIN_MAX_BUCKETS: "10000",
 		ADMIN_LOGIN_WINDOW_MS: "900000",
 		ADMIN_MFA_ENCRYPTION_KEY: "f".repeat(48),
 		ADMIN_SESSION_SECRET: "b".repeat(48),
 		ADMIN_STORE_DRIVER: "postgres",
 		CONTACT_ADDRESS: "hello@ballotclarity.org",
+		CONTACT_ADDRESS_RATE_LIMIT_MAX: "12",
+		CONTACT_ADDRESS_RATE_LIMIT_MAX_BUCKETS: "10000",
+		CONTACT_ADDRESS_RATE_LIMIT_WINDOW_MS: "60000",
 		CONTACT_ADDRESS_SESSION_SECRET: "c".repeat(48),
+		CENSUS_GEOCODER_FETCH_TIMEOUT_MS: "15000",
+		CONGRESS_FETCH_TIMEOUT_MS: "15000",
+		GOOGLE_CIVIC_FETCH_TIMEOUT_MS: "15000",
+		LDA_FETCH_TIMEOUT_MS: "15000",
 		LIVE_COVERAGE_FETCH_MAX_BYTES: "5242880",
 		LIVE_COVERAGE_FETCH_TIMEOUT_MS: "15000",
 		LIVE_COVERAGE_FILE: writeSnapshot(),
 		LIVE_COVERAGE_REQUIRED: "true",
 		NUXT_PUBLIC_API_BASE: "https://ballotclarity.org/api/",
+		NUXT_PUBLIC_API_FETCH_TIMEOUT_MS: "15000",
 		NUXT_PUBLIC_GOVERNING_LAW: "State of Georgia",
 		NUXT_PUBLIC_OPERATOR_LEGAL_NAME: "Jacob Anderson",
 		NUXT_PUBLIC_SITE_URL: "https://ballotclarity.org",
 		NUXT_PUBLIC_VENUE: "state or federal courts located in Georgia",
 		PUBLIC_FEEDBACK_RATE_LIMIT_MAX: "5",
+		PUBLIC_FEEDBACK_RATE_LIMIT_MAX_BUCKETS: "10000",
 		PUBLIC_FEEDBACK_RATE_LIMIT_WINDOW_MS: "600000",
 		PUBLIC_LOOKUP_RATE_LIMIT_MAX: "60",
+		PUBLIC_LOOKUP_RATE_LIMIT_MAX_BUCKETS: "10000",
 		PUBLIC_LOOKUP_RATE_LIMIT_WINDOW_MS: "600000",
+		PUBLIC_REPRESENTATIVE_CACHE_MAX_ENTRIES: "1000",
+		PUBLIC_REPRESENTATIVE_CACHE_TTL_MS: "900000",
+		OPENFEC_FETCH_TIMEOUT_MS: "15000",
+		OPENSTATES_FETCH_TIMEOUT_MS: "15000",
+		PROVIDER_RESPONSE_MAX_BYTES: "5242880",
+		REPRESENTATIVE_MODULE_CACHE_MAX_ENTRIES: "1000",
+		REPRESENTATIVE_MODULE_CACHE_TTL_MS: "900000",
 		SOURCE_ASSET_BASE_URL: "https://assets.ballotclarity.org/source-files",
 		TRUST_PROXY: "loopback",
+		BALLOTCLARITY_ZIP_LOOKUP_LOG_MAX_BYTES: "10485760",
+		ZIP_LOCATION_FETCH_TIMEOUT_MS: "15000",
 		...overrides,
 	};
 }
@@ -277,30 +299,74 @@ test("production config check fails missing or placeholder public legal policy c
 test("production config check fails invalid throttle values", () => {
 	const evaluation = evaluateProductionConfig({
 		env: buildProductionEnv({
+			ADMIN_API_FETCH_TIMEOUT_MS: "forever",
+			ADDRESS_CACHE_MAX_ROWS: "unbounded",
 			ADMIN_LOGIN_LOCKOUT_MS: "-1000",
 			ADMIN_LOGIN_IP_MAX_ATTEMPTS: "none",
 			ADMIN_LOGIN_MAX_ATTEMPTS: "many",
+			ADMIN_LOGIN_MAX_BUCKETS: "0",
 			ADMIN_LOGIN_WINDOW_MS: "0",
+			CENSUS_GEOCODER_FETCH_TIMEOUT_MS: "0",
+			CONGRESS_FETCH_TIMEOUT_MS: "none",
+			CONTACT_ADDRESS_RATE_LIMIT_MAX: "0",
+			CONTACT_ADDRESS_RATE_LIMIT_MAX_BUCKETS: "unbounded",
+			CONTACT_ADDRESS_RATE_LIMIT_WINDOW_MS: "-1",
+			GOOGLE_CIVIC_FETCH_TIMEOUT_MS: "-1",
+			LDA_FETCH_TIMEOUT_MS: "none",
 			LIVE_COVERAGE_FETCH_MAX_BYTES: "unbounded",
 			LIVE_COVERAGE_FETCH_TIMEOUT_MS: "-1",
+			NUXT_PUBLIC_API_FETCH_TIMEOUT_MS: "0",
+			OPENFEC_FETCH_TIMEOUT_MS: "none",
+			OPENSTATES_FETCH_TIMEOUT_MS: "0",
+			PROVIDER_RESPONSE_MAX_BYTES: "unbounded",
 			PUBLIC_FEEDBACK_RATE_LIMIT_MAX: "0",
+			PUBLIC_FEEDBACK_RATE_LIMIT_MAX_BUCKETS: "unbounded",
 			PUBLIC_FEEDBACK_RATE_LIMIT_WINDOW_MS: "ten-minutes",
 			PUBLIC_LOOKUP_RATE_LIMIT_MAX: "60.5",
+			PUBLIC_LOOKUP_RATE_LIMIT_MAX_BUCKETS: "-1",
 			PUBLIC_LOOKUP_RATE_LIMIT_WINDOW_MS: "-1",
+			PUBLIC_REPRESENTATIVE_CACHE_MAX_ENTRIES: "unbounded",
+			PUBLIC_REPRESENTATIVE_CACHE_TTL_MS: "forever",
+			REPRESENTATIVE_MODULE_CACHE_MAX_ENTRIES: "unbounded",
+			REPRESENTATIVE_MODULE_CACHE_TTL_MS: "forever",
+			BALLOTCLARITY_ZIP_LOOKUP_LOG_MAX_BYTES: "forever",
+			ZIP_LOCATION_FETCH_TIMEOUT_MS: "none",
 		}),
 	});
 
 	assert.equal(evaluation.ok, false);
+	assert.ok(issueIds(evaluation, "errors").includes("address_cache_max_rows.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_lockout_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_max_attempts.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_ip_max_attempts.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("admin_login_max_buckets.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_login_window_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("admin_api_fetch_timeout_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("contact_address_rate_limit_max.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("contact_address_rate_limit_max_buckets.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("contact_address_rate_limit_window_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("census_geocoder_fetch_timeout_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("congress_fetch_timeout_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("google_civic_fetch_timeout_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("lda_fetch_timeout_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("live_coverage_fetch_max_bytes.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("live_coverage_fetch_timeout_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("nuxt_public_api_fetch_timeout_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("openfec_fetch_timeout_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("openstates_fetch_timeout_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("provider_response_max_bytes.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_feedback_rate_limit_max.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("public_feedback_rate_limit_max_buckets.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_feedback_rate_limit_window_ms.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_lookup_rate_limit_max.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("public_lookup_rate_limit_max_buckets.invalid"));
 	assert.ok(issueIds(evaluation, "errors").includes("public_lookup_rate_limit_window_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("public_representative_cache_max_entries.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("public_representative_cache_ttl_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("representative_module_cache_max_entries.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("representative_module_cache_ttl_ms.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("ballotclarity_zip_lookup_log_max_bytes.invalid"));
+	assert.ok(issueIds(evaluation, "errors").includes("zip_location_fetch_timeout_ms.invalid"));
 });
 
 test("production config check rejects missing or overly broad proxy trust", () => {
@@ -317,6 +383,49 @@ test("production config check rejects missing or overly broad proxy trust", () =
 	assert.ok(issueIds(missing, "errors").includes("trust_proxy.missing"));
 	assert.ok(issueIds(broad, "errors").includes("trust_proxy.broad"));
 	assert.ok(issueIds(invalid, "errors").includes("trust_proxy.invalid"));
+});
+
+test("production config check requires verified provenance for proxy geography headers", () => {
+	const untrusted = evaluateProductionConfig({
+		env: buildProductionEnv({
+			LOCATION_GUESS_MODE: "proxy_headers",
+			LOCATION_GUESS_PROXY_POSTAL_CODE_HEADERS: "x-geo-postal-code",
+		}),
+	});
+	const incomplete = evaluateProductionConfig({
+		env: buildProductionEnv({
+			LOCATION_GUESS_MODE: "proxy_headers",
+			LOCATION_GUESS_PROXY_HEADERS_TRUSTED: "true",
+		}),
+	});
+	const trusted = evaluateProductionConfig({
+		env: buildProductionEnv({
+			LOCATION_GUESS_MODE: "proxy_headers",
+			LOCATION_GUESS_PROXY_HEADERS_TRUSTED: "true",
+			LOCATION_GUESS_PROXY_POSTAL_CODE_HEADERS: "x-geo-postal-code",
+		}),
+	});
+
+	assert.ok(issueIds(untrusted, "errors").includes("location_guess_proxy_headers.untrusted"));
+	assert.ok(issueIds(incomplete, "errors").includes("location_guess_proxy_headers.incomplete"));
+	assert.equal(trusted.ok, true);
+});
+
+test("production config check rejects secret reuse across security boundaries", () => {
+	const reusedSecret = "r".repeat(48);
+	const evaluation = evaluateProductionConfig({
+		env: buildProductionEnv({
+			ADMIN_API_KEY: reusedSecret,
+			ADMIN_SESSION_SECRET: reusedSecret,
+		}),
+	});
+
+	assert.equal(evaluation.ok, false);
+	assert.ok(issueIds(evaluation, "errors").includes("secret.reuse"));
+	assert.match(
+		evaluation.errors.find(issue => issue.id === "secret.reuse")?.message ?? "",
+		/ADMIN_API_KEY, ADMIN_SESSION_SECRET/u
+	);
 });
 
 test("production config check allows valid optional ballot-content provider endpoints", () => {

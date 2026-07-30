@@ -382,8 +382,9 @@ function clearFilters() {
 							</p>
 							<ol class="mt-3 space-y-2">
 								<li v-for="item in group.items" :key="item.slug">
-									<a
+									<SafeExternalLink
 										:href="item.href"
+										:new-tab="false"
 										class="p-3 border border-app-line/80 rounded-[1.15rem] bg-app-bg/55 flex gap-3 transition items-start justify-between dark:border-app-line-dark hover:border-app-accent/60 dark:bg-app-bg-dark/70 focus-ring"
 									>
 										<div class="min-w-0">
@@ -408,7 +409,7 @@ function clearFilters() {
 												{{ item.saved ? "Saved" : "Open" }}
 											</span>
 										</div>
-									</a>
+									</SafeExternalLink>
 								</li>
 							</ol>
 						</div>

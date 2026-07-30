@@ -1,14 +1,17 @@
 import type { LocationLookupResponse } from "../src/types/civic.js";
+import type { ZipLookupLogEvent } from "../src/zip-lookup-logger.js";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
 	createZipLookupLogger,
+	defaultZipLookupLogMaxBytes,
 	defaultZipLookupLogPath,
 	isZipLookupLoggingEnabled,
 	normalizeZipLookupLogInput,
+	resolveZipLookupLogMaxBytes,
 } from "../src/zip-lookup-logger.js";
 
 const resolvedResponse: LocationLookupResponse = {
@@ -42,6 +45,15 @@ test("ZIP lookup logger defaults to the production JSONL path", () => {
 	const logger = createZipLookupLogger({ enabled: false });
 
 	assert.equal(logger.logPath, defaultZipLookupLogPath);
+	assert.equal(logger.maxBytes, defaultZipLookupLogMaxBytes);
+});
+
+test("ZIP lookup log size resolver accepts only positive safe integers", () => {
+	assert.equal(resolveZipLookupLogMaxBytes("1024"), 1024);
+	assert.equal(resolveZipLookupLogMaxBytes(256.9), 256);
+	assert.equal(resolveZipLookupLogMaxBytes("0"), defaultZipLookupLogMaxBytes);
+	assert.equal(resolveZipLookupLogMaxBytes("unbounded"), defaultZipLookupLogMaxBytes);
+	assert.equal(resolveZipLookupLogMaxBytes(Number.MAX_SAFE_INTEGER + 1), defaultZipLookupLogMaxBytes);
 });
 
 test("ZIP lookup logger writes exact normalized 5-digit ZIP lookups", async () => {
@@ -81,6 +93,59 @@ test("ZIP lookup logger writes exact normalized 5-digit ZIP lookups", async () =
 	finally {
 		rmSync(tempDir, { force: true, recursive: true });
 	}
+});
+
+test("ZIP lookup logger rotates one bounded backup and restricts filesystem permissions", async () => {
+	const tempDir = mkdtempSync(join(tmpdir(), "ballot-clarity-zip-log-"));
+	const logPath = join(tempDir, "private", "zip-events.jsonl");
+
+	try {
+		const logger = createZipLookupLogger({
+			enabled: true,
+			logPath,
+			maxBytes: 200,
+			now: () => new Date("2026-04-26T21:00:00.000Z"),
+		});
+
+		await logger.record("30022", resolvedResponse);
+		await logger.record("30303", resolvedResponse);
+
+		assert.equal(readLogEvents(`${logPath}.1`).length, 1);
+		assert.equal(readLogEvents(`${logPath}.1`)[0]?.zip5, "30022");
+		assert.equal(readLogEvents(logPath).length, 1);
+		assert.equal(readLogEvents(logPath)[0]?.zip5, "30303");
+		assert.equal(statSync(logPath).mode & 0o777, 0o600);
+		assert.equal(statSync(`${logPath}.1`).mode & 0o777, 0o600);
+		assert.equal(statSync(dirname(logPath)).mode & 0o777, 0o700);
+	}
+	finally {
+		rmSync(tempDir, { force: true, recursive: true });
+	}
+});
+
+test("ZIP lookup logger serializes concurrent writes", async () => {
+	let activeWrites = 0;
+	let maximumActiveWrites = 0;
+	const writtenZipCodes: string[] = [];
+	const logger = createZipLookupLogger({
+		appendLine: async (_path, line) => {
+			activeWrites += 1;
+			maximumActiveWrites = Math.max(maximumActiveWrites, activeWrites);
+			await new Promise(resolve => setTimeout(resolve, 5));
+			writtenZipCodes.push((JSON.parse(line) as ZipLookupLogEvent).zip5);
+			activeWrites -= 1;
+		},
+		enabled: true,
+	});
+
+	await Promise.all([
+		logger.record("30022", resolvedResponse),
+		logger.record("30303", resolvedResponse),
+		logger.record("30213", resolvedResponse),
+	]);
+
+	assert.equal(maximumActiveWrites, 1);
+	assert.deepEqual(writtenZipCodes, ["30022", "30303", "30213"]);
 });
 
 test("ZIP lookup logger stays silent for full addresses containing a ZIP", async () => {

@@ -31,6 +31,7 @@ const adminDbPath = join(e2eTempDir, "e2e-smoke.sqlite");
 const localCoverageFile = join(repoRoot, "back-end/data/live-coverage.local.json");
 const displayTimeZoneCookieName = "ballot-clarity-display-time-zone";
 const activeNationwideLookupCookieName = "ballot-clarity-nationwide-lookup";
+const browserSecurityConsolePattern = /hydration|mismatch|content security policy|refused to (?:connect|execute|load)|violates the following/iu;
 const deployRecoveryUnloadCountKey = "ballot-clarity:test-unload-count";
 const deployRecoverySeenReloadKey = "ballot-clarity:test-seen-reload-key";
 const nationwideLookupSnapshot = {
@@ -663,7 +664,12 @@ before(async () => {
 	});
 	apiProcess = api.child;
 
-	await waitForUrl(`${apiBaseUrl}/health`, "API");
+	try {
+		await waitForUrl(`${apiBaseUrl}/health`, "API");
+	}
+	catch (error) {
+		throw new Error(`${String(error)}\n\nAPI output:\n${api.getOutput()}`);
+	}
 
 	const app = startProcess(process.execPath, ["front-end/.output/server/index.mjs"], {
 		...process.env,
@@ -768,9 +774,12 @@ test("built app renders the key ballot guide pages against the built API", async
 
 	assert.equal(ballotResponse.status, 200);
 	assert.equal(homePage.status, 200);
-	assert.match(homePage.headers.get("content-security-policy-report-only") ?? "", /default-src 'self'/);
-	assert.match(homePage.headers.get("content-security-policy-report-only") ?? "", /frame-ancestors 'none'/);
-	assert.match(homePage.headers.get("content-security-policy-report-only") ?? "", /script-src 'self' 'unsafe-inline'/);
+	assert.match(homePage.headers.get("content-security-policy") ?? "", /default-src 'self'/);
+	assert.match(homePage.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+	assert.match(homePage.headers.get("content-security-policy") ?? "", /script-src 'self' 'sha256-/);
+	assert.doesNotMatch(homePage.headers.get("content-security-policy")?.match(/script-src [^;]+/)?.[0] ?? "", /'unsafe-inline'/);
+	assert.match(homePage.headers.get("content-security-policy") ?? "", /connect-src [^;]*http:\/\/127\.0\.0\.1:\*/);
+	assert.equal(homePage.headers.get("content-security-policy-report-only"), null);
 	assert.equal(homePage.headers.get("cross-origin-opener-policy"), "same-origin");
 	assert.equal(homePage.headers.get("cross-origin-resource-policy"), "same-origin");
 	assert.equal(homePage.headers.get("origin-agent-cluster"), "?1");
@@ -788,8 +797,8 @@ test("built app renders the key ballot guide pages against the built API", async
 	assert.equal(missingPage.headers.get("x-robots-tag"), "noindex, nofollow");
 	assert.match(missingHtml, /This page could not be found/);
 	assert.match(missingHtml, /noindex,nofollow/);
-	assert.match(ballotResponse.headers.get("content-security-policy-report-only") ?? "", /default-src 'none'/);
-	assert.match(ballotResponse.headers.get("content-security-policy-report-only") ?? "", /frame-ancestors 'none'/);
+	assert.match(ballotResponse.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+	assert.match(ballotResponse.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
 	assert.equal(ballotResponse.headers.get("cross-origin-opener-policy"), "same-origin");
 	assert.equal(ballotResponse.headers.get("cross-origin-resource-policy"), "same-origin");
 	assert.equal(ballotResponse.headers.get("origin-agent-cluster"), "?1");
@@ -811,8 +820,8 @@ test("built app renders the key ballot guide pages against the built API", async
 	assert.match(homeHtml, /og:image/);
 	assert.match(homeHtml, /twitter:image/);
 	assert.match(homeHtml, /social-card\.svg/);
-	assert.match(ballotPage.headers.get("content-security-policy-report-only") ?? "", /default-src 'self'/);
-	assert.match(ballotPage.headers.get("content-security-policy-report-only") ?? "", /frame-ancestors 'none'/);
+	assert.match(ballotPage.headers.get("content-security-policy") ?? "", /default-src 'self'/);
+	assert.match(ballotPage.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
 	assert.match(ballotHtml, /Key dates and official links/);
 	assert.match(ballotHtml, /Election overview/);
 	assert.match(ballotHtml, /Official links are live for this area/);
@@ -1153,7 +1162,7 @@ test("built app does not log a hydration mismatch when dark mode is stored befor
 		assert.match(pageState.colorModeClass ?? "", /\bdark\b/);
 		assert.equal(pageState.themeToggleLabel, "Switch to light mode");
 		assert.equal(
-			consoleMessages.some(message => /hydration|mismatch/i.test(message)),
+			consoleMessages.some(message => browserSecurityConsolePattern.test(message)),
 			false,
 			`Unexpected hydration console output:\n${consoleMessages.join("\n")}`
 		);
@@ -1309,7 +1318,8 @@ test("stale client tabs recover cleanly when the stored build id is older than t
 		assert.equal(pageState.reloadMarkerCleared, null);
 		assert.equal(pageState.reloadMarkerSeen, `${staleClientReloadKeyPrefix}${currentBuildId}`);
 		assert.equal(
-			consoleMessages.some(message => /hydration|mismatch|failed to fetch dynamically imported module|chunkloaderror/i.test(message)),
+			consoleMessages.some(message => browserSecurityConsolePattern.test(message)
+				|| /failed to fetch dynamically imported module|chunkloaderror/iu.test(message)),
 			false,
 			`Unexpected stale-client console output:\n${consoleMessages.join("\n")}`
 		);
@@ -1536,7 +1546,7 @@ test("saved guide shell context loads district and representative hubs without a
 		assert.match(districtsText, /Fulton County|State Senate District 48|Johns Creek city/);
 		assert.doesNotMatch(districtsText, /Start with lookup|Refresh results for this page/);
 		assert.equal(
-			consoleMessages.some(message => /hydration|mismatch/i.test(message)),
+			consoleMessages.some(message => browserSecurityConsolePattern.test(message)),
 			false,
 			`Unexpected saved-guide console output:\n${consoleMessages.join("\n")}`
 		);

@@ -5,6 +5,7 @@ import type {
 } from "./coverage-repository.js";
 import type { AdminContentItem, GuideContentSummary } from "./types/civic.js";
 import { buildDefaultGuidePackageSeed, buildGuidePackageRecord } from "./guide-packages.js";
+import { normalizePublicHref } from "./public-href.js";
 
 export const referenceArchiveCandidateNames = [
 	"Elena Torres",
@@ -27,12 +28,18 @@ export interface PlaceholderUrlMatch {
 	url: string;
 }
 
+export interface UnsafePublicHrefMatch {
+	path: string;
+	url: string;
+}
+
 export interface CoverageSnapshotValidationResult {
 	ok: boolean;
 	errors: string[];
 	warnings: string[];
 	placeholderUrlMatches: PlaceholderUrlMatch[];
 	referenceArchiveMatches: ReferenceArchiveMatch[];
+	unsafePublicHrefMatches: UnsafePublicHrefMatch[];
 	guideContent: GuideContentSummary[];
 }
 
@@ -160,6 +167,51 @@ function findPlaceholderUrlMatches(value: unknown, path = "$"): PlaceholderUrlMa
 	return [];
 }
 
+function isPublicHrefFieldName(key: string | undefined) {
+	if (!key)
+		return false;
+
+	const normalized = key.replaceAll(/[_-]/gu, "").toLowerCase();
+	return normalized === "href"
+		|| normalized === "hrefs"
+		|| normalized === "url"
+		|| normalized === "urls"
+		|| normalized === "website"
+		|| normalized === "websites"
+		|| normalized.endsWith("href")
+		|| normalized.endsWith("hrefs")
+		|| normalized.endsWith("url")
+		|| normalized.endsWith("urls")
+		|| normalized.endsWith("website")
+		|| normalized.endsWith("websites");
+}
+
+function findUnsafePublicHrefMatches(
+	value: unknown,
+	path = "$",
+	fieldName?: string,
+): UnsafePublicHrefMatch[] {
+	if (typeof value === "string") {
+		return value.trim() && isPublicHrefFieldName(fieldName) && !normalizePublicHref(value)
+			? [{ path, url: value }]
+			: [];
+	}
+
+	if (Array.isArray(value)) {
+		return value.flatMap((item, index) => {
+			return findUnsafePublicHrefMatches(item, `${path}[${index}]`, fieldName);
+		});
+	}
+
+	if (value && typeof value === "object") {
+		return Object.entries(value).flatMap(([key, child]) => {
+			return findUnsafePublicHrefMatches(child, `${path}.${key}`, key);
+		});
+	}
+
+	return [];
+}
+
 function buildGuideContentSummaries(
 	snapshot: CoverageSnapshot,
 	metadata: CoverageSnapshotMetadata,
@@ -189,6 +241,7 @@ export function validateCoverageSnapshotForPublication(
 	const warnings: string[] = [];
 	const referenceArchiveMatches = findReferenceArchiveMatches(snapshot);
 	const placeholderUrlMatches = findPlaceholderUrlMatches(snapshot);
+	const unsafePublicHrefMatches = findUnsafePublicHrefMatches(snapshot);
 	const guideContent = buildGuideContentSummaries(snapshot, metadata, options.contentItems ?? []);
 	const isReviewedOrApproved = metadata.status === "reviewed" || metadata.status === "production_approved";
 
@@ -221,6 +274,17 @@ export function validateCoverageSnapshotForPublication(
 			warnings.push(message);
 	}
 
+	if (unsafePublicHrefMatches.length) {
+		const matchedPaths = unsafePublicHrefMatches
+			.slice(0, 8)
+			.map(match => match.path)
+			.join(", ");
+		const remainingCount = Math.max(unsafePublicHrefMatches.length - 8, 0);
+		errors.push(
+			`Snapshot contains unsafe public URL values at ${matchedPaths}${remainingCount ? ` and ${remainingCount} more location${remainingCount === 1 ? "" : "s"}` : ""}.`,
+		);
+	}
+
 	for (const content of guideContent) {
 		if (!isReviewedOrApproved)
 			continue;
@@ -242,6 +306,7 @@ export function validateCoverageSnapshotForPublication(
 		ok: errors.length === 0,
 		placeholderUrlMatches,
 		referenceArchiveMatches,
+		unsafePublicHrefMatches,
 		warnings,
 	};
 }
@@ -251,6 +316,7 @@ export function summarizeCoverageSnapshotValidation(result: CoverageSnapshotVali
 		result.ok ? "Validation: pass" : "Validation: fail",
 		`Reference archive matches: ${result.referenceArchiveMatches.length}`,
 		`Placeholder/internal URL matches: ${result.placeholderUrlMatches.length}`,
+		`Unsafe public URL matches: ${result.unsafePublicHrefMatches.length}`,
 		`Guide content packages checked: ${result.guideContent.length}`,
 		`Warnings: ${result.warnings.length}`,
 		`Errors: ${result.errors.length}`,

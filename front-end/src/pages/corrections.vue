@@ -34,7 +34,7 @@ usePageSeo({
 						Corrections log
 					</h1>
 					<p class="text-base text-app-muted leading-8 mt-5 dark:text-app-muted-dark">
-						This log is public on purpose. It shows substantive corrections that affect public interpretation, launch status, or trust signals, while keeping reporter identity and private review notes out of view.
+						This log is public on purpose. New submissions remain private until an authenticated editor and MFA-enabled admin review them for publication. Published entries show substantive corrections that affect public interpretation, launch status, or trust signals while keeping reporter identity and private review notes out of view.
 					</p>
 					<div class="mt-6 flex flex-wrap gap-4 items-center">
 						<UpdatedAt :value="data.updatedAt" label="Corrections log updated" />

@@ -45,4 +45,15 @@ test("admin mutation origin checks fail closed when production provenance is abs
 		expectedOrigin,
 		production: false,
 	}), true);
+	assert.equal(isAllowedAdminMutationOrigin({
+		expectedOrigin,
+		fetchSite: "same-origin",
+		origin: "not a URL",
+		production: true,
+	}), false);
+	assert.equal(isAllowedAdminMutationOrigin({
+		expectedOrigin: "not a URL",
+		fetchSite: "same-origin",
+		production: true,
+	}), false);
 });

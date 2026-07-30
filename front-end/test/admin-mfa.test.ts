@@ -6,6 +6,8 @@ import test from "node:test";
 const loginPage = readFileSync(resolve("src/pages/admin/login.vue"), "utf8");
 const accountPage = readFileSync(resolve("src/pages/admin/account.vue"), "utf8");
 const usersPage = readFileSync(resolve("src/pages/admin/users.vue"), "utf8");
+const sourcesPage = readFileSync(resolve("src/pages/admin/sources.vue"), "utf8");
+const packagesPage = readFileSync(resolve("src/pages/admin/packages.vue"), "utf8");
 const dashboardPage = readFileSync(resolve("src/pages/admin/index.vue"), "utf8");
 const adminAuth = readFileSync(resolve("server/utils/admin-auth.ts"), "utf8");
 const adminOriginMiddleware = readFileSync(resolve("server/middleware/admin-origin.ts"), "utf8");
@@ -40,18 +42,33 @@ test("admin users page exposes MFA state and admin reset", () => {
 	assert.match(usersPage, /MFA not enabled/);
 	assert.match(usersPage, /Reset MFA/);
 	assert.match(usersPage, /mfaReset: true/);
+	assert.match(usersPage, /canManageAccounts/);
+	assert.match(usersPage, /Boolean\(session\.value\.mfaEnabledAt\)/);
+	assert.match(usersPage, /Enable multi-factor authentication on your Account page/);
 	assert.match(adminAuth, /\/admin\/auth\/mfa\/setup/);
 	assert.match(adminAuth, /\/admin\/auth\/mfa\/enable/);
 	assert.match(adminAuth, /\/admin\/auth\/mfa\/disable/);
 	assert.match(adminAuth, /currentPassword/);
 });
 
+test("high-impact admin screens require an MFA-enabled admin session", () => {
+	assert.match(sourcesPage, /canManageSources/);
+	assert.match(sourcesPage, /Boolean\(session\.value\.mfaEnabledAt\)/);
+	assert.match(sourcesPage, /:disabled="!canManageSources/);
+	assert.match(packagesPage, /canPublish/);
+	assert.match(packagesPage, /Boolean\(session\.value\.mfaEnabledAt\)/);
+	assert.match(adminAuth, /async function requirePrivilegedAdminSession/);
+	assert.match(adminAuth, /Enable multi-factor authentication before performing this admin action/);
+});
+
 test("admin dashboard exposes MFA coverage from the protected overview", () => {
 	assert.match(dashboardPage, /overview\.value\?\.security/);
 	assert.match(dashboardPage, /Account security/);
-	assert.match(dashboardPage, /Admin MFA coverage/);
+	assert.match(dashboardPage, /Admin account controls/);
 	assert.match(dashboardPage, /security\.mfaEnabledUserCount/);
 	assert.match(dashboardPage, /security\.usersWithoutMfa/);
+	assert.match(dashboardPage, /security\.passwordChangeRequiredUserCount/);
+	assert.match(dashboardPage, /security\.usersRequiringPasswordChange/);
 	assert.match(dashboardPage, /Manage users/);
 });
 
@@ -60,6 +77,8 @@ test("admin sessions use secure cookies, signed backend delegation, and same-ori
 	assert.match(adminAuth, /httpOnly: true/);
 	assert.match(adminAuth, /sameSite: "strict"/);
 	assert.match(adminAuth, /secure: process\.env\.NODE_ENV === "production"/);
+	assert.match(adminAuth, /function deleteAdminSessionCookie/);
+	assert.equal((adminAuth.match(/deleteAdminSessionCookie\(event\)/gu) ?? []).length, 2);
 	assert.match(adminAuth, /x-admin-session-token/);
 	assert.doesNotMatch(adminAuth, /x-admin-actor-(?:display-name|role|username)/);
 	assert.match(adminOriginMiddleware, /pathname\.startsWith\("\/api\/admin"\)/);

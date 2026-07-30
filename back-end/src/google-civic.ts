@@ -11,6 +11,14 @@ import { Buffer } from "node:buffer";
 import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
 import process from "node:process";
+import {
+	ProviderResponseTooLargeError,
+	readProviderResponseJson,
+	resolveProviderResponseMaxBytes,
+} from "./fetch-response.js";
+import { createFetchTimeoutSignal, resolveFetchTimeoutMs } from "./fetch-timeout.js";
+import { buildProfileImage } from "./profile-images.js";
+import { normalizePublicHref } from "./public-href.js";
 
 interface GoogleCivicAddress {
 	locationName?: string;
@@ -128,6 +136,7 @@ interface GoogleCivicClientOptions {
 	apiKey?: string;
 	fetchImpl?: typeof fetch;
 	forceIPv4?: boolean;
+	timeoutMs?: number;
 }
 
 interface LookupOptions {
@@ -227,7 +236,7 @@ function buildCandidateImage(candidate: GoogleCivicCandidate): ProfileImage | nu
 	if (!imageUrl || !name)
 		return null;
 
-	return {
+	return buildProfileImage({
 		alt: `Photo of ${name}`,
 		priority: 30,
 		sourceKind: "provider",
@@ -235,7 +244,7 @@ function buildCandidateImage(candidate: GoogleCivicCandidate): ProfileImage | nu
 		sourceSystem: "Google Civic Information API",
 		sourceUrl: candidate.candidateUrl?.trim() || undefined,
 		url: imageUrl,
-	};
+	});
 }
 
 function buildCandidatePreviews(contests: GoogleCivicContest[] | undefined) {
@@ -251,7 +260,7 @@ function buildCandidatePreviews(contests: GoogleCivicContest[] | undefined) {
 			const profileImages = [buildCandidateImage(candidate)].filter((image): image is ProfileImage => Boolean(image));
 
 			return {
-				candidateUrl: candidate.candidateUrl?.trim() || undefined,
+				candidateUrl: normalizePublicHref(candidate.candidateUrl) || undefined,
 				email: candidate.email?.trim() || undefined,
 				id: `google-civic:candidate:${contestIndex}:${candidateIndex}`,
 				name,
@@ -277,7 +286,7 @@ function buildBallotContentCandidate(
 	const profileImages = [buildCandidateImage(candidate)].filter((image): image is ProfileImage => Boolean(image));
 
 	return {
-		candidateUrl: candidate.candidateUrl?.trim() || undefined,
+		candidateUrl: normalizePublicHref(candidate.candidateUrl) || undefined,
 		email: candidate.email?.trim() || undefined,
 		id: `google-civic:ballot-candidate:${contestIndex}:${candidateIndex}`,
 		name,
@@ -295,7 +304,7 @@ function buildBallotContentContest(contest: GoogleCivicContest, contestIndex: nu
 	const referendumTitle = contest.referendumTitle?.trim();
 	const referendumBrief = contest.referendumBrief?.trim();
 	const referendumText = contest.referendumText?.trim();
-	const referendumUrl = contest.referendumUrl?.trim();
+	const referendumUrl = normalizePublicHref(contest.referendumUrl);
 	const title = contest.ballotTitle?.trim()
 		|| contest.office?.trim()
 		|| referendumTitle
@@ -482,15 +491,23 @@ async function requestGoogleCivicJson<T>(
 	{
 		fetchImpl,
 		forceIPv4,
-	}: Pick<GoogleCivicClientOptions, "fetchImpl" | "forceIPv4">,
+		timeoutMs,
+	}: Pick<GoogleCivicClientOptions, "fetchImpl" | "forceIPv4" | "timeoutMs">,
 ) {
 	const response = await fetchGoogleCivic(resource, {
 		fetchImpl,
 		forceIPv4,
+		signal: createFetchTimeoutSignal(resolveFetchTimeoutMs(timeoutMs)),
 	});
 
 	if (response.status === 400 || response.status === 404) {
-		const errorPayload = await response.json().catch(() => ({})) as GoogleCivicErrorResponse;
+		const errorPayload: GoogleCivicErrorResponse = await readProviderResponseJson<GoogleCivicErrorResponse>(response)
+			.catch((error: unknown) => {
+				if (error instanceof SyntaxError)
+					return {} satisfies GoogleCivicErrorResponse;
+
+				throw error;
+			});
 
 		return {
 			errorPayload,
@@ -504,13 +521,15 @@ async function requestGoogleCivicJson<T>(
 
 	return {
 		ok: true as const,
-		payload: await response.json() as T,
+		payload: await readProviderResponseJson<T>(response),
 		response,
 	};
 }
 
 function pushOfficialAction(actions: LocationLookupAction[], id: string, title: string, url: string | undefined, description: string) {
-	if (!url)
+	const safeUrl = normalizePublicHref(url);
+
+	if (!safeUrl)
 		return;
 
 	actions.push({
@@ -519,7 +538,7 @@ function pushOfficialAction(actions: LocationLookupAction[], id: string, title: 
 		id,
 		kind: "official-verification",
 		title,
-		url
+		url: safeUrl
 	});
 }
 
@@ -591,6 +610,7 @@ export function createGoogleCivicLookup(lookupImpl: DnsLookupFn = dnsLookup as D
 }
 
 async function fetchGoogleCivicWithPreferredIpv4(resource: URL, headers: Record<string, string>, signal?: AbortSignal) {
+	const maxResponseBytes = resolveProviderResponseMaxBytes();
 	const response = await new Promise<{
 		headers: Record<string, string | string[] | undefined>;
 		statusCode: number;
@@ -608,9 +628,29 @@ async function fetchGoogleCivicWithPreferredIpv4(resource: URL, headers: Record<
 			headers,
 		}, (response) => {
 			const chunks: Buffer[] = [];
+			const declaredLength = Number(response.headers["content-length"]);
+			let receivedBytes = 0;
+
+			response.on("error", (error) => {
+				cleanupAbortListener();
+				reject(error);
+			});
+
+			if (Number.isSafeInteger(declaredLength) && declaredLength > maxResponseBytes) {
+				response.destroy(new ProviderResponseTooLargeError(maxResponseBytes, declaredLength));
+				return;
+			}
 
 			response.on("data", (chunk) => {
-				chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+				const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+				receivedBytes += buffer.byteLength;
+
+				if (receivedBytes > maxResponseBytes) {
+					response.destroy(new ProviderResponseTooLargeError(maxResponseBytes, receivedBytes));
+					return;
+				}
+
+				chunks.push(buffer);
 			});
 			response.on("end", () => {
 				cleanupAbortListener();
@@ -621,7 +661,6 @@ async function fetchGoogleCivicWithPreferredIpv4(resource: URL, headers: Record<
 					text: Buffer.concat(chunks).toString("utf8")
 				});
 			});
-			response.on("error", reject);
 		});
 
 		const abortRequest = () => {
@@ -697,14 +736,17 @@ export function createGoogleCivicClient(
 		? {
 				apiKey,
 				fetchImpl: fetchOrOptions,
-				forceIPv4
+				forceIPv4,
+				timeoutMs: resolveFetchTimeoutMs(process.env.GOOGLE_CIVIC_FETCH_TIMEOUT_MS),
 			}
 		: {
 				apiKey: process.env.GOOGLE_CIVIC_API_KEY?.trim(),
 				fetchImpl: fetch,
 				forceIPv4: shouldForceGoogleCivicIpv4(),
+				timeoutMs: resolveFetchTimeoutMs(process.env.GOOGLE_CIVIC_FETCH_TIMEOUT_MS),
 				...fetchOrOptions
 			};
+	options.timeoutMs = resolveFetchTimeoutMs(options.timeoutMs);
 
 	const resolvedApiKey = options.apiKey?.trim();
 
@@ -718,6 +760,7 @@ export function createGoogleCivicClient(
 				{
 					fetchImpl: options.fetchImpl,
 					forceIPv4: options.forceIPv4,
+					timeoutMs: options.timeoutMs,
 				},
 			);
 
@@ -742,6 +785,7 @@ export function createGoogleCivicClient(
 					{
 						fetchImpl: options.fetchImpl,
 						forceIPv4: options.forceIPv4,
+						timeoutMs: options.timeoutMs,
 					},
 				);
 
@@ -758,6 +802,7 @@ export function createGoogleCivicClient(
 							{
 								fetchImpl: options.fetchImpl,
 								forceIPv4: options.forceIPv4,
+								timeoutMs: options.timeoutMs,
 							},
 						);
 

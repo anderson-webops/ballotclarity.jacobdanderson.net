@@ -15,14 +15,17 @@ definePageMeta({
 });
 
 const { data, refresh } = await useAdminGuidePackages();
+const { data: session } = await useAdminSession("admin-packages-session");
 
 const draftElectionSlug = ref("2026-fulton-county-general");
 const draftJurisdictionSlug = ref("fulton-county-georgia");
 const savingId = ref<string | null>(null);
 const feedbackMessage = ref("");
 const feedbackTone = ref<"error" | "success">("success");
+const unpublishReasons = reactive<Record<string, string>>({});
+const canPublish = computed(() => session.value?.role === "admin" && Boolean(session.value.mfaEnabledAt));
 
-const statusOptions: GuidePackageStatus[] = ["draft", "in_review", "ready_to_publish", "published"];
+const statusOptions: GuidePackageStatus[] = ["draft", "in_review", "ready_to_publish"];
 const recommendationOptions: GuidePackageReviewRecommendation[] = [
 	"publish",
 	"publish_with_warnings",
@@ -178,7 +181,6 @@ async function savePackage(item: GuidePackageRecord) {
 				coverageNotes: item.workflow.coverageNotes,
 				reviewNotes: item.workflow.reviewNotes,
 				reviewRecommendation: item.workflow.reviewRecommendation,
-				reviewer: item.workflow.reviewer,
 				status: item.workflow.status === "published" ? undefined : item.workflow.status,
 			},
 			method: "PATCH",
@@ -189,11 +191,7 @@ async function savePackage(item: GuidePackageRecord) {
 async function publishPackage(item: GuidePackageRecord) {
 	await withPackageAction(item.workflow.id, async () => {
 		await $fetch(`/api/admin/packages/${item.workflow.id}/publish`, {
-			body: {
-				reviewNotes: item.workflow.reviewNotes,
-				reviewRecommendation: item.workflow.reviewRecommendation,
-				reviewer: item.workflow.reviewer,
-			},
+			body: {},
 			method: "POST",
 		});
 	});
@@ -203,12 +201,11 @@ async function unpublishPackage(item: GuidePackageRecord) {
 	await withPackageAction(item.workflow.id, async () => {
 		await $fetch(`/api/admin/packages/${item.workflow.id}/unpublish`, {
 			body: {
-				reviewNotes: item.workflow.reviewNotes,
-				reviewRecommendation: item.workflow.reviewRecommendation,
-				reviewer: item.workflow.reviewer,
+				reason: unpublishReasons[item.workflow.id],
 			},
 			method: "POST",
 		});
+		unpublishReasons[item.workflow.id] = "";
 	});
 }
 
@@ -488,8 +485,12 @@ usePageSeo({
 								<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Status</span>
 								<select
 									v-model="item.workflow.status"
+									:disabled="item.workflow.status === 'published'"
 									class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 								>
+									<option v-if="item.workflow.status === 'published'" value="published">
+										Published
+									</option>
 									<option v-for="status in statusOptions" :key="status" :value="status">
 										{{ statusLabel(status) }}
 									</option>
@@ -498,11 +499,9 @@ usePageSeo({
 
 							<label class="block">
 								<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Reviewer</span>
-								<input
-									v-model="item.workflow.reviewer"
-									type="text"
-									class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
-								>
+								<p class="text-sm text-app-muted mt-2 px-4 py-3 border border-app-line rounded-2xl bg-white min-h-13 shadow-sm dark:text-app-muted-dark dark:border-app-line-dark dark:bg-app-panel-dark">
+									{{ item.workflow.reviewer || "Recorded from the authenticated account when review is saved." }}
+								</p>
 							</label>
 
 							<label class="block">
@@ -553,14 +552,26 @@ usePageSeo({
 								<button type="submit" class="btn-secondary w-full" :disabled="savingId === item.workflow.id">
 									{{ savingId === item.workflow.id ? "Saving..." : "Save workflow state" }}
 								</button>
-								<button v-if="item.workflow.status !== 'published'" type="button" class="btn-primary w-full" :disabled="savingId === item.workflow.id" @click="publishPackage(item)">
+								<p v-if="session?.role === 'admin' && !session.mfaEnabledAt" class="text-xs text-app-muted leading-5 dark:text-app-muted-dark">
+									Enable multi-factor authentication on the Account page before publishing or unpublishing.
+								</p>
+								<button v-if="item.workflow.status !== 'published' && canPublish" type="button" class="btn-primary w-full" :disabled="savingId === item.workflow.id" @click="publishPackage(item)">
 									Publish package
 								</button>
+								<label v-if="item.workflow.status === 'published' && canPublish" class="block">
+									<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Unpublish reason</span>
+									<textarea
+										v-model="unpublishReasons[item.workflow.id]"
+										rows="3"
+										class="text-sm text-app-ink mt-2 px-4 py-3 border border-app-line rounded-2xl bg-white min-h-24 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
+										placeholder="Explain why this package must return to review."
+									/>
+								</label>
 								<button
-									v-if="item.workflow.status === 'published'"
+									v-if="item.workflow.status === 'published' && canPublish"
 									type="button"
 									class="btn-secondary w-full"
-									:disabled="savingId === item.workflow.id"
+									:disabled="savingId === item.workflow.id || !unpublishReasons[item.workflow.id]?.trim()"
 									@click="unpublishPackage(item)"
 								>
 									Unpublish package

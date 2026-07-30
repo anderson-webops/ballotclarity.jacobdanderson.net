@@ -27,3 +27,36 @@ test("admin login throttling protects both accounts and source addresses", () =>
 	assert.equal(throttle.check("user-four", "203.0.113.20").allowed, false);
 	assert.equal(throttle.check("user-four", "203.0.113.21").allowed, true);
 });
+
+test("admin login throttling fails closed without growing beyond its bucket cap", () => {
+	const throttle = createAdminLoginThrottle({
+		accountMaxAttempts: 5,
+		ipMaxAttempts: 5,
+		maxBuckets: 2,
+		windowMs: 60_000,
+	});
+	const first = throttle.check("editor-one", "203.0.113.30");
+
+	assert.equal(first.allowed, true);
+	throttle.recordFailure(first.keys);
+
+	const capacityLimited = throttle.check("editor-two", "203.0.113.31");
+
+	assert.equal(capacityLimited.allowed, false);
+	assert.equal(capacityLimited.capacityLimited, true);
+	assert.ok(capacityLimited.retryAfterSeconds >= 1);
+
+	throttle.recordFailure(capacityLimited.keys);
+	assert.equal(throttle.check("editor-two", "203.0.113.31").capacityLimited, true);
+});
+
+test("admin login throttling rejects invalid direct limits", () => {
+	assert.throws(
+		() => createAdminLoginThrottle({ maxBuckets: Number.POSITIVE_INFINITY }),
+		/maxBuckets must be a positive integer/u,
+	);
+	assert.throws(
+		() => createAdminLoginThrottle({ accountMaxAttempts: 0 }),
+		/accountMaxAttempts must be a positive integer/u,
+	);
+});

@@ -2,6 +2,8 @@ import type { OpenStatesClient } from "./openstates.js";
 import type { LocationRepresentativeMatch } from "./types/civic.js";
 import process from "node:process";
 import { buildDistrictMatches } from "./census-geocoder.js";
+import { readProviderResponseJson } from "./fetch-response.js";
+import { createFetchTimeoutSignal, resolveFetchTimeoutMs } from "./fetch-timeout.js";
 
 interface ZipLocationApiPlace {
 	latitude?: string;
@@ -62,6 +64,7 @@ interface ZipLocationServiceOptions {
 	benchmark?: string;
 	fetchImpl?: typeof fetch;
 	openStatesClient?: OpenStatesClient | null;
+	timeoutMs?: number;
 	vintage?: string;
 }
 
@@ -108,7 +111,8 @@ async function lookupCoordinatesContext(
 	latitude: number | undefined,
 	longitude: number | undefined,
 	benchmark: string,
-	vintage: string
+	vintage: string,
+	timeoutMs: number
 ) {
 	if (latitude === undefined || longitude === undefined) {
 		return {
@@ -130,13 +134,14 @@ async function lookupCoordinatesContext(
 	const response = await fetchImpl(requestUrl, {
 		headers: {
 			Accept: "application/json"
-		}
+		},
+		signal: createFetchTimeoutSignal(timeoutMs),
 	});
 
 	if (!response.ok)
 		throw new Error(`Census reverse-geography lookup failed: ${response.status} ${response.statusText}`);
 
-	const payload = await response.json() as CensusCoordinatesResponse;
+	const payload = await readProviderResponseJson<CensusCoordinatesResponse>(response);
 	const geographies = payload.result?.geographies;
 	const county = geographies?.Counties?.[0];
 	const state = geographies?.States?.[0];
@@ -170,14 +175,18 @@ export function createZipLocationService({
 	benchmark = process.env.CENSUS_GEOCODER_BENCHMARK?.trim() || defaultBenchmark,
 	fetchImpl = fetch,
 	openStatesClient = null,
+	timeoutMs = resolveFetchTimeoutMs(process.env.ZIP_LOCATION_FETCH_TIMEOUT_MS),
 	vintage = process.env.CENSUS_GEOCODER_VINTAGE?.trim() || defaultVintage
 }: ZipLocationServiceOptions = {}): ZipLocationService {
+	const resolvedTimeoutMs = resolveFetchTimeoutMs(timeoutMs);
+
 	return {
 		async lookupZip(zipCode: string) {
 			const response = await fetchImpl(`${zippopotamUrl}/${encodeURIComponent(zipCode)}`, {
 				headers: {
 					Accept: "application/json"
-				}
+				},
+				signal: createFetchTimeoutSignal(resolvedTimeoutMs),
 			});
 
 			if (response.status === 404)
@@ -186,7 +195,7 @@ export function createZipLocationService({
 			if (!response.ok)
 				throw new Error(`ZIP lookup failed: ${response.status} ${response.statusText}`);
 
-			const payload = await response.json() as ZipLocationApiResponse;
+			const payload = await readProviderResponseJson<ZipLocationApiResponse>(response);
 			const postalCode = payload["post code"];
 
 			if (!postalCode || !payload.places?.length)
@@ -195,7 +204,14 @@ export function createZipLocationService({
 			const matches = (await Promise.all(payload.places.map(async (place) => {
 				const latitude = toNumber(place.latitude);
 				const longitude = toNumber(place.longitude);
-				const geoContext = await lookupCoordinatesContext(fetchImpl, latitude, longitude, benchmark, vintage)
+				const geoContext = await lookupCoordinatesContext(
+					fetchImpl,
+					latitude,
+					longitude,
+					benchmark,
+					vintage,
+					resolvedTimeoutMs
+				)
 					.catch(() => ({
 						countyFips: undefined,
 						countyName: undefined,

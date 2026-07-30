@@ -1,4 +1,5 @@
 import { appDescription, appName, appSocialImageAlt, appSocialImagePath } from "~/constants";
+import { serializeJsonLd } from "~/utils/json-ld";
 
 interface PageSeoInput {
 	description?: string;
@@ -47,7 +48,7 @@ export function usePageSeo(input: PageSeoInput) {
 			}
 		],
 		script: jsonLdEntries.map((entry, index) => ({
-			innerHTML: JSON.stringify(entry),
+			innerHTML: serializeJsonLd(entry),
 			key: `jsonld-${index}`,
 			type: "application/ld+json"
 		}))

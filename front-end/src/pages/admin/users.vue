@@ -9,6 +9,7 @@ definePageMeta({
 
 const { data: session } = await useAdminSession("admin-users-session");
 const { data, refresh, error } = await useAdminUsers();
+const canManageAccounts = computed(() => session.value?.role === "admin" && Boolean(session.value.mfaEnabledAt));
 
 const form = reactive({
 	displayName: "",
@@ -32,7 +33,7 @@ async function createUser() {
 			body: form,
 			method: "POST"
 		});
-		feedbackMessage.value = "Admin user created.";
+		feedbackMessage.value = "Admin user created. They must replace the temporary password at next sign-in.";
 		feedbackTone.value = "success";
 		form.displayName = "";
 		form.password = "";
@@ -85,7 +86,7 @@ async function resetUserPassword(userId: string) {
 			body: { password },
 			method: "PATCH"
 		});
-		feedbackMessage.value = "Temporary password set. Existing sessions for that account were invalidated.";
+		feedbackMessage.value = "Temporary password set. Existing sessions were invalidated, and the account must change it at next sign-in.";
 		feedbackTone.value = "success";
 		resetPasswords[userId] = "";
 		await refresh();
@@ -126,7 +127,7 @@ async function resetUserMfa(userId: string) {
 }
 
 function canAdminEditUser(user: { username: string }) {
-	return session.value?.role === "admin" && session.value.username !== user.username;
+	return canManageAccounts.value && session.value?.username !== user.username;
 }
 
 usePageSeo({
@@ -153,6 +154,9 @@ usePageSeo({
 
 		<InfoCallout v-if="session?.role !== 'admin'" title="Admin-only area" tone="warning">
 			Only admin users can create or review accounts. Your current session is read-only for this page.
+		</InfoCallout>
+		<InfoCallout v-else-if="!session.mfaEnabledAt" title="MFA required" tone="warning">
+			Enable multi-factor authentication on your Account page before creating, disabling, restoring, or resetting an account.
 		</InfoCallout>
 
 		<p
@@ -196,6 +200,11 @@ usePageSeo({
 									:label="user.mfaEnabledAt ? 'MFA enabled' : 'MFA not enabled'"
 									:tone="user.mfaEnabledAt ? 'accent' : 'warning'"
 								/>
+								<TrustBadge
+									v-if="user.passwordChangeRequiredAt"
+									label="password change required"
+									tone="warning"
+								/>
 							</div>
 						</div>
 						<div class="mt-4 gap-4 grid sm:grid-cols-2">
@@ -205,6 +214,7 @@ usePageSeo({
 								{{ user.lastLoginAt || "No recorded login yet" }}
 							</p>
 							<UpdatedAt v-if="user.credentialsUpdatedAt" :value="user.credentialsUpdatedAt" label="Credentials" />
+							<UpdatedAt v-if="user.passwordChangeRequiredAt" :value="user.passwordChangeRequiredAt" label="Temporary password issued" />
 							<UpdatedAt v-if="user.mfaEnabledAt" :value="user.mfaEnabledAt" label="MFA enabled" />
 							<UpdatedAt v-if="user.disabledAt" :value="user.disabledAt" label="Disabled" />
 						</div>
@@ -213,7 +223,7 @@ usePageSeo({
 								v-if="!user.disabledAt"
 								type="button"
 								class="btn-secondary"
-								:disabled="session?.role !== 'admin' || session?.username === user.username || updatingId === user.id"
+								:disabled="!canManageAccounts || session?.username === user.username || updatingId === user.id"
 								@click="setUserDisabled(user.id, true)"
 							>
 								{{ updatingId === user.id ? "Updating..." : "Disable sign-in" }}
@@ -222,7 +232,7 @@ usePageSeo({
 								v-else
 								type="button"
 								class="btn-secondary"
-								:disabled="session?.role !== 'admin' || updatingId === user.id"
+								:disabled="!canManageAccounts || updatingId === user.id"
 								@click="setUserDisabled(user.id, false)"
 							>
 								{{ updatingId === user.id ? "Updating..." : "Restore sign-in" }}
@@ -245,7 +255,7 @@ usePageSeo({
 								<span class="sr-only">Temporary password for {{ user.username }}</span>
 								<input
 									v-model="resetPasswords[user.id]"
-									:disabled="session?.role !== 'admin' || session?.username === user.username || updatingId === user.id"
+									:disabled="!canManageAccounts || session?.username === user.username || updatingId === user.id"
 									type="password"
 									autocomplete="new-password"
 									placeholder="New temporary password"
@@ -255,13 +265,13 @@ usePageSeo({
 							<button
 								type="submit"
 								class="btn-secondary"
-								:disabled="session?.role !== 'admin' || session?.username === user.username || updatingId === user.id || !(resetPasswords[user.id] || '').trim()"
+								:disabled="!canManageAccounts || session?.username === user.username || updatingId === user.id || !(resetPasswords[user.id] || '').trim()"
 							>
 								{{ updatingId === user.id ? "Updating..." : "Reset password" }}
 							</button>
 						</form>
 						<p class="text-xs text-app-muted mt-2 dark:text-app-muted-dark">
-							Temporary passwords must be at least 12 characters. Resetting a password invalidates existing sessions for that account.
+							Temporary passwords must be at least 12 characters. Creating or resetting one invalidates existing sessions and requires the account to replace it at next sign-in.
 						</p>
 					</li>
 				</ul>
@@ -279,7 +289,7 @@ usePageSeo({
 						<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Display name</span>
 						<input
 							v-model="form.displayName"
-							:disabled="session?.role !== 'admin'"
+							:disabled="!canManageAccounts"
 							type="text"
 							class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 						>
@@ -289,7 +299,7 @@ usePageSeo({
 						<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Username</span>
 						<input
 							v-model="form.username"
-							:disabled="session?.role !== 'admin'"
+							:disabled="!canManageAccounts"
 							type="text"
 							autocomplete="off"
 							class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
@@ -300,7 +310,7 @@ usePageSeo({
 						<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Role</span>
 						<select
 							v-model="form.role"
-							:disabled="session?.role !== 'admin'"
+							:disabled="!canManageAccounts"
 							class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 						>
 							<option value="editor">
@@ -316,16 +326,19 @@ usePageSeo({
 						<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Temporary password</span>
 						<input
 							v-model="form.password"
-							:disabled="session?.role !== 'admin'"
+							:disabled="!canManageAccounts"
 							type="password"
 							autocomplete="new-password"
 							class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 						>
 					</label>
 
-					<button type="submit" class="btn-primary w-full" :disabled="isSubmitting || session?.role !== 'admin'">
+					<button type="submit" class="btn-primary w-full" :disabled="isSubmitting || !canManageAccounts">
 						{{ isSubmitting ? "Creating..." : "Create user" }}
 					</button>
+					<p class="text-xs text-app-muted leading-6 dark:text-app-muted-dark">
+						The new account must replace this temporary password before using any other admin workflow.
+					</p>
 				</form>
 			</div>
 		</section>

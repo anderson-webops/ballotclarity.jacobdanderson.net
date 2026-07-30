@@ -1,4 +1,5 @@
 import process from "node:process";
+import { readProviderResponseText } from "./fetch-response.js";
 import { fetchGoogleCivic } from "./google-civic.js";
 import { resolveProviderCredential } from "./provider-config.js";
 import {
@@ -21,7 +22,7 @@ const defaultProviderProbeTimeoutMs = 15000;
 
 function providerProbeTimeoutMs() {
 	const value = Number.parseInt(process.env.PROVIDER_TEST_TIMEOUT_MS || "", 10);
-	return Number.isFinite(value) && value > 0 ? value : defaultProviderProbeTimeoutMs;
+	return Number.isSafeInteger(value) && value > 0 ? value : defaultProviderProbeTimeoutMs;
 }
 
 async function withProviderTimeout<T>(operation: (signal: AbortSignal) => Promise<T>) {
@@ -42,7 +43,7 @@ function formatProbeError(error: unknown) {
 }
 
 async function readJson(response: Response) {
-	const text = await response.text();
+	const text = await readProviderResponseText(response);
 
 	try {
 		return {
@@ -167,7 +168,7 @@ async function checkGoogleCivic() {
 			voterInfoUrl.searchParams.set("returnAllAvailableData", "true");
 			voterInfoUrl.searchParams.set("key", credential.value);
 			const voterInfoResponse = await withProviderTimeout(signal => fetchGoogleCivic(voterInfoUrl, { signal }));
-			const voterInfoBody = await voterInfoResponse.text();
+			const voterInfoBody = await readProviderResponseText(voterInfoResponse);
 
 			voterInfoNote = buildGoogleCivicVoterInfoNote(voterInfoResponse, voterInfoBody);
 		}

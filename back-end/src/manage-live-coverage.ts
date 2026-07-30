@@ -1,8 +1,17 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { coverageSnapshotMetadataPath } from "./coverage-repository.js";
+import {
+	coverageSnapshotMetadataPath,
+	readCoverageSnapshot,
+	readCoverageSnapshotMetadata,
+} from "./coverage-repository.js";
+import {
+	summarizeCoverageSnapshotValidation,
+	validateCoverageSnapshotForPublication,
+} from "./coverage-snapshot-validation.js";
 
 function readFlag(flag: string, argv = process.argv.slice(2)) {
 	const index = argv.indexOf(flag);
@@ -56,26 +65,112 @@ export function backupSnapshot(snapshotPath: string) {
 	};
 }
 
-export function promoteSnapshot(candidatePath: string, targetPath: string) {
-	if (!existsSync(candidatePath))
-		throw new Error(`Candidate snapshot not found at ${candidatePath}.`);
+function assertPromotableSnapshot(snapshotPath: string) {
+	const metadataPath = coverageSnapshotMetadataPath(snapshotPath);
 
-	if (!existsSync(coverageSnapshotMetadataPath(candidatePath)))
-		throw new Error(`Candidate snapshot metadata not found at ${coverageSnapshotMetadataPath(candidatePath)}.`);
+	if (!existsSync(snapshotPath))
+		throw new Error(`Coverage snapshot not found at ${snapshotPath}.`);
+
+	if (!existsSync(metadataPath))
+		throw new Error(`Coverage snapshot metadata not found at ${metadataPath}.`);
+
+	const snapshot = readCoverageSnapshot(snapshotPath);
+	const metadata = readCoverageSnapshotMetadata(snapshotPath);
+
+	if (metadata.status !== "reviewed" && metadata.status !== "production_approved") {
+		throw new Error(
+			`Coverage snapshot status must be reviewed or production_approved before activation; received ${metadata.status}.`
+		);
+	}
+
+	const validation = validateCoverageSnapshotForPublication(snapshot, metadata);
+
+	if (!validation.ok) {
+		throw new Error([
+			"Coverage snapshot failed publication validation.",
+			...summarizeCoverageSnapshotValidation(validation),
+		].join("\n"));
+	}
+}
+
+function temporarySiblingPath(targetPath: string, purpose: string) {
+	return join(
+		dirname(targetPath),
+		`.${basename(targetPath)}.${purpose}.${process.pid}.${randomUUID()}.tmp`
+	);
+}
+
+function replaceSnapshotPair(sourcePath: string, targetPath: string) {
+	const sourceMetadataPath = coverageSnapshotMetadataPath(sourcePath);
+	const targetMetadataPath = coverageSnapshotMetadataPath(targetPath);
+	const stagedSnapshotPath = temporarySiblingPath(targetPath, "staged");
+	const stagedMetadataPath = temporarySiblingPath(targetMetadataPath, "staged");
+	const previousSnapshotPath = existsSync(targetPath)
+		? temporarySiblingPath(targetPath, "previous")
+		: null;
+	const previousMetadataPath = existsSync(targetMetadataPath)
+		? temporarySiblingPath(targetMetadataPath, "previous")
+		: null;
+	let snapshotReplaced = false;
+	let metadataReplaced = false;
 
 	mkdirSync(dirname(targetPath), { recursive: true });
-	copyFileSync(candidatePath, targetPath);
-	copyFileSync(coverageSnapshotMetadataPath(candidatePath), coverageSnapshotMetadataPath(targetPath));
+
+	try {
+		copyFileSync(sourcePath, stagedSnapshotPath);
+		copyFileSync(sourceMetadataPath, stagedMetadataPath);
+
+		if (previousSnapshotPath)
+			copyFileSync(targetPath, previousSnapshotPath);
+
+		if (previousMetadataPath)
+			copyFileSync(targetMetadataPath, previousMetadataPath);
+
+		// Replace data before its approval sidecar. An interrupted process therefore
+		// cannot apply newer approval metadata to older snapshot content.
+		renameSync(stagedSnapshotPath, targetPath);
+		snapshotReplaced = true;
+		renameSync(stagedMetadataPath, targetMetadataPath);
+		metadataReplaced = true;
+	}
+	catch (error) {
+		if (snapshotReplaced) {
+			if (previousSnapshotPath && existsSync(previousSnapshotPath))
+				renameSync(previousSnapshotPath, targetPath);
+			else
+				rmSync(targetPath, { force: true });
+		}
+
+		if (metadataReplaced) {
+			if (previousMetadataPath && existsSync(previousMetadataPath))
+				renameSync(previousMetadataPath, targetMetadataPath);
+			else
+				rmSync(targetMetadataPath, { force: true });
+		}
+
+		throw error;
+	}
+	finally {
+		for (const path of [
+			stagedSnapshotPath,
+			stagedMetadataPath,
+			previousSnapshotPath,
+			previousMetadataPath,
+		]) {
+			if (path)
+				rmSync(path, { force: true });
+		}
+	}
+}
+
+export function promoteSnapshot(candidatePath: string, targetPath: string) {
+	assertPromotableSnapshot(candidatePath);
+	replaceSnapshotPair(candidatePath, targetPath);
 }
 
 export function rollbackSnapshot(targetPath: string, backupPath: string) {
-	if (!existsSync(backupPath))
-		throw new Error(`Backup snapshot not found at ${backupPath}.`);
-
-	copyFileSync(backupPath, targetPath);
-
-	if (existsSync(coverageSnapshotMetadataPath(backupPath)))
-		copyFileSync(coverageSnapshotMetadataPath(backupPath), coverageSnapshotMetadataPath(targetPath));
+	assertPromotableSnapshot(backupPath);
+	replaceSnapshotPair(backupPath, targetPath);
 }
 
 export function listBackups(targetPath: string) {

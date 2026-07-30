@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { isExternalHref } from "~/utils/link";
+
 defineProps<{
 	items: Array<{
 		href?: string;
@@ -7,23 +9,15 @@ defineProps<{
 		value: string | number;
 	}>;
 }>();
-
-const externalHrefPattern = /^https?:\/\//;
-
-function isExternalHref(href: string) {
-	return externalHrefPattern.test(href);
-}
 </script>
 
 <template>
 	<div class="summary-strip">
 		<template v-for="item in items" :key="item.label">
-			<a
+			<SafeExternalLink
 				v-if="item.href && isExternalHref(item.href)"
 				:href="item.href"
 				class="summary-strip__item summary-strip__item--interactive focus-ring"
-				rel="noopener noreferrer"
-				target="_blank"
 			>
 				<p class="summary-strip__label">
 					{{ item.label }}
@@ -34,7 +28,7 @@ function isExternalHref(href: string) {
 				<p v-if="item.note" class="summary-strip__note">
 					{{ item.note }}
 				</p>
-			</a>
+			</SafeExternalLink>
 
 			<NuxtLink
 				v-else-if="item.href"

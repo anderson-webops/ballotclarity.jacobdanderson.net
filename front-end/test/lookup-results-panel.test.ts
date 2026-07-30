@@ -12,7 +12,10 @@ test("lookup availability cards render in a balanced desktop grid", () => {
 
 test("lookup availability cards hide low-value limited cards", () => {
 	assert.match(lookupResultsPanel, /const primaryAvailabilityIds = new Set\(\["official-logistics", "representatives", "local-guide"\]\)/);
-	assert.match(lookupResultsPanel, /const visibleAvailabilityItems = computed\(\(\) => availabilityItems\.value\.filter/);
+	assert.match(
+		lookupResultsPanel,
+		/const visibleAvailabilityItems = computed\(\(\) =>\s*availabilityItems\.value\.filter/
+	);
 	assert.match(lookupResultsPanel, /if \(!card\.href \|\| card\.item\.status === "unavailable"\)/);
 	assert.match(lookupResultsPanel, /primaryAvailabilityIds\.has\(card\.id\)/);
 	assert.match(lookupResultsPanel, /return card\.item\.status === "available"/);

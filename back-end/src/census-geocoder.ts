@@ -1,5 +1,7 @@
 import type { LocationDistrictMatch } from "./types/civic.js";
 import process from "node:process";
+import { readProviderResponseJson } from "./fetch-response.js";
+import { createFetchTimeoutSignal, resolveFetchTimeoutMs } from "./fetch-timeout.js";
 
 interface CensusGeocoderResponse {
 	result?: {
@@ -49,6 +51,7 @@ export interface CensusGeocoderClient {
 interface CensusGeocoderClientOptions {
 	benchmark?: string;
 	fetchImpl?: typeof fetch;
+	timeoutMs?: number;
 	vintage?: string;
 }
 
@@ -147,8 +150,11 @@ export function buildDistrictMatches(geographies: Record<string, CensusGeography
 export function createCensusGeocoderClient({
 	benchmark = process.env.CENSUS_GEOCODER_BENCHMARK?.trim() || defaultBenchmark,
 	fetchImpl = fetch,
+	timeoutMs = resolveFetchTimeoutMs(process.env.CENSUS_GEOCODER_FETCH_TIMEOUT_MS),
 	vintage = process.env.CENSUS_GEOCODER_VINTAGE?.trim() || defaultVintage
 }: CensusGeocoderClientOptions = {}): CensusGeocoderClient {
+	const resolvedTimeoutMs = resolveFetchTimeoutMs(timeoutMs);
+
 	return {
 		async lookupAddress(address: string) {
 			const requestUrl = new URL(geocoderUrl);
@@ -160,13 +166,14 @@ export function createCensusGeocoderClient({
 			const response = await fetchImpl(requestUrl, {
 				headers: {
 					Accept: "application/json"
-				}
+				},
+				signal: createFetchTimeoutSignal(resolvedTimeoutMs),
 			});
 
 			if (!response.ok)
 				throw new Error(`Census geocoder lookup failed: ${response.status} ${response.statusText}`);
 
-			const payload = await response.json() as CensusGeocoderResponse;
+			const payload = await readProviderResponseJson<CensusGeocoderResponse>(response);
 			const match = payload.result?.addressMatches?.[0];
 
 			if (!match)

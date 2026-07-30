@@ -21,7 +21,11 @@ function base32Encode(bytes: Buffer) {
 }
 
 function base32Decode(value: string) {
-	const normalized = value.toUpperCase().replace(/[^A-Z2-7]/g, "");
+	const normalized = value.trim().toUpperCase();
+
+	if (!/^[A-Z2-7]{32}$/u.test(normalized))
+		throw new Error("Invalid MFA secret.");
+
 	let bits = "";
 
 	for (const character of normalized) {

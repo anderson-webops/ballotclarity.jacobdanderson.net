@@ -17,6 +17,8 @@ import type {
 	TrustBullet,
 } from "./types/civic.js";
 import process from "node:process";
+import { buildProfileImage } from "./profile-images.js";
+import { normalizePublicHref } from "./public-href.js";
 import { classifyRepresentative } from "./representative-classification.js";
 import { openSecretJson, sealSecretJson } from "./secret-envelope.js";
 
@@ -206,17 +208,7 @@ function sanitizeProfileImage(value: unknown): ProfileImage | null {
 	if (!alt || !sourceLabel || !sourceSystem || !url)
 		return null;
 
-	try {
-		const parsedUrl = new URL(url);
-
-		if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:")
-			return null;
-	}
-	catch {
-		return null;
-	}
-
-	return {
+	return buildProfileImage({
 		alt,
 		attribution: typeof value.attribution === "string" ? value.attribution.trim() || undefined : undefined,
 		capturedAt: typeof value.capturedAt === "string" ? value.capturedAt.trim() || undefined : undefined,
@@ -228,7 +220,7 @@ function sanitizeProfileImage(value: unknown): ProfileImage | null {
 		sourceSystem,
 		sourceUrl: typeof value.sourceUrl === "string" ? value.sourceUrl.trim() || undefined : undefined,
 		url,
-	};
+	});
 }
 
 function sanitizeRepresentativeMatch(value: unknown): LocationRepresentativeMatch | null {
@@ -274,7 +266,7 @@ function sanitizeRepresentativeMatch(value: unknown): LocationRepresentativeMatc
 			: classification.officeDisplayLabel,
 		officeType: classification.officeType,
 		officeTitle,
-		openstatesUrl: typeof value.openstatesUrl === "string" ? value.openstatesUrl : undefined,
+		openstatesUrl: normalizePublicHref(value.openstatesUrl) || undefined,
 		party: typeof value.party === "string" ? value.party : undefined,
 		profileImages: Array.isArray(value.profileImages)
 			? value.profileImages.map(sanitizeProfileImage).filter((item): item is ProfileImage => Boolean(item))
@@ -303,7 +295,7 @@ function sanitizeLookupAction(value: unknown): LocationLookupAction | null {
 		kind,
 		location: sanitizeLocationSelection(value.location) ?? undefined,
 		title,
-		url: typeof value.url === "string" ? value.url : undefined,
+		url: normalizePublicHref(value.url) || undefined,
 	};
 }
 

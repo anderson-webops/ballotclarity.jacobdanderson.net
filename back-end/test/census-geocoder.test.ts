@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCensusGeocoderClient } from "../src/census-geocoder.js";
+import { ProviderResponseTooLargeError } from "../src/fetch-response.js";
 
 test("createCensusGeocoderClient maps district geography from the Census response", async () => {
-	const fetchImpl = (async () => {
+	let capturedSignal: AbortSignal | null | undefined;
+	const fetchImpl = (async (_resource, init) => {
+		capturedSignal = init?.signal;
 		return new Response(JSON.stringify({
 			result: {
 				addressMatches: [
@@ -62,6 +65,7 @@ test("createCensusGeocoderClient maps district geography from the Census respons
 	const client = createCensusGeocoderClient({
 		benchmark: "Public_AR_Current",
 		fetchImpl,
+		timeoutMs: 5_000,
 		vintage: "Current_Current"
 	});
 
@@ -76,4 +80,22 @@ test("createCensusGeocoderClient maps district geography from the Census respons
 	assert.equal(result.districtMatches[1].label, "Congressional District 5");
 	assert.equal(result.districtMatches[2].label, "State Senate District 36");
 	assert.equal(result.districtMatches[3].label, "State House District 58");
+	assert.ok(capturedSignal instanceof AbortSignal);
+});
+
+test("createCensusGeocoderClient rejects an oversized provider response before parsing it", async () => {
+	const client = createCensusGeocoderClient({
+		fetchImpl: (async () => new Response("{}", {
+			headers: {
+				"Content-Length": String((5 * 1024 * 1024) + 1),
+				"Content-Type": "application/json",
+			},
+			status: 200,
+		})) as typeof fetch,
+	});
+
+	await assert.rejects(
+		client.lookupAddress("55 Trinity Ave SW, Atlanta, GA 30303"),
+		ProviderResponseTooLargeError,
+	);
 });

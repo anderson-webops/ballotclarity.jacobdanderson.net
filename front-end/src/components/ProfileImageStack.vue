@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ProfileImage } from "~/types/civic";
+import { normalizeImageHref } from "~/utils/link";
 
 const props = withDefaults(defineProps<{
 	images?: ProfileImage[];
@@ -14,6 +15,10 @@ const props = withDefaults(defineProps<{
 
 const activeIndex = ref(0);
 const orderedImages = computed(() => [...props.images]
+	.map(image => ({
+		...image,
+		url: normalizeImageHref(image.url),
+	}))
 	.filter(image => Boolean(image.url))
 	.sort((left, right) =>
 		left.priority - right.priority

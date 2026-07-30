@@ -1,5 +1,7 @@
 import type { LocationRepresentativeMatch, ProfileImage } from "./types/civic.js";
 import process from "node:process";
+import { readProviderResponseJson, readProviderResponseText } from "./fetch-response.js";
+import { createFetchTimeoutSignal, resolveFetchTimeoutMs } from "./fetch-timeout.js";
 import { uniqueProfileImages } from "./profile-images.js";
 import { classifyRepresentative } from "./representative-classification.js";
 
@@ -118,7 +120,7 @@ function toLocationRepresentative(person: OpenStatesRepresentativeRecord): Locat
 export function createOpenStatesClient({
 	apiKey = process.env.OPENSTATES_API_KEY?.trim(),
 	fetchImpl = fetch,
-	timeoutMs = Number(process.env.OPENSTATES_FETCH_TIMEOUT_MS || 15000)
+	timeoutMs = resolveFetchTimeoutMs(process.env.OPENSTATES_FETCH_TIMEOUT_MS)
 }: OpenStatesClientOptions = {}): OpenStatesClient | null {
 	const resolvedApiKey = apiKey?.trim();
 
@@ -126,6 +128,7 @@ export function createOpenStatesClient({
 		return null;
 
 	const apiKeyValue = resolvedApiKey;
+	const resolvedTimeoutMs = resolveFetchTimeoutMs(timeoutMs);
 
 	async function fetchOpenStates(pathname: string, query: Record<string, string>) {
 		const requestUrl = new URL(pathname, "https://v3.openstates.org");
@@ -139,16 +142,16 @@ export function createOpenStatesClient({
 			headers: {
 				Accept: "application/json"
 			},
-			signal: AbortSignal.timeout(timeoutMs)
+			signal: createFetchTimeoutSignal(resolvedTimeoutMs)
 		});
 
 		if (!response.ok) {
-			const detail = await response.text();
+			const detail = await readProviderResponseText(response);
 
 			throw new Error(`Open States lookup failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ""}`.slice(0, 500));
 		}
 
-		return await response.json() as OpenStatesPersonResponse;
+		return await readProviderResponseJson<OpenStatesPersonResponse>(response);
 	}
 
 	return {

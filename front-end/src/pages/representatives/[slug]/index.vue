@@ -327,18 +327,18 @@ usePageSeo({
 					</div>
 					<div class="bc-action-cluster mt-6">
 						<SourceDrawer :sources="person.sources" :title="`${person.name} sources and supporting records`" button-label="Sources & records" />
-						<a v-if="campaignLink" :href="campaignLink" target="_blank" rel="noopener noreferrer" class="btn-secondary">
+						<SafeExternalLink v-if="campaignLink" :href="campaignLink" class="btn-secondary">
 							<span class="i-carbon-launch" />
 							Open campaign site
-						</a>
-						<a v-if="person.officialWebsiteUrl" :href="person.officialWebsiteUrl" target="_blank" rel="noopener noreferrer" class="btn-secondary inline-flex gap-2 items-center">
+						</SafeExternalLink>
+						<SafeExternalLink v-if="person.officialWebsiteUrl" :href="person.officialWebsiteUrl" class="btn-secondary inline-flex gap-2 items-center">
 							Official office site
 							<span class="i-carbon-launch" />
-						</a>
-						<a v-if="person.openstatesUrl" :href="person.openstatesUrl" target="_blank" rel="noopener noreferrer" class="btn-secondary inline-flex gap-2 items-center">
+						</SafeExternalLink>
+						<SafeExternalLink v-if="person.openstatesUrl" :href="person.openstatesUrl" class="btn-secondary inline-flex gap-2 items-center">
 							Provider record
 							<span class="i-carbon-launch" />
-						</a>
+						</SafeExternalLink>
 						<NuxtLink v-if="hasFunding" :to="buildLookupAwareTarget(`/representatives/${person.slug}/funding`)" class="btn-secondary">
 							Funding page
 						</NuxtLink>
@@ -391,17 +391,15 @@ usePageSeo({
 									Reference links
 								</p>
 								<div class="mt-4 flex flex-wrap gap-3">
-									<a
+									<SafeExternalLink
 										v-for="link in officeContextReferenceLinks"
 										:key="`${link.label}-${link.url}`"
 										:href="link.url"
-										target="_blank"
-										rel="noopener noreferrer"
 										class="btn-secondary"
 									>
 										{{ link.label }}
 										<span class="i-carbon-launch" />
-									</a>
+									</SafeExternalLink>
 								</div>
 							</div>
 						</div>

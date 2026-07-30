@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AdminPriority, AdminReviewStatus } from "~/types/civic";
+import type { AdminContentItem, AdminPriority, AdminReviewStatus } from "~/types/civic";
 import { FetchError } from "ofetch";
 
 definePageMeta({
@@ -8,8 +8,12 @@ definePageMeta({
 });
 
 const { data, refresh } = await useAdminContent();
+const { data: session } = await useAdminSession("admin-content-session");
 
-const statusOptions: AdminReviewStatus[] = ["draft", "in-review", "needs-sources", "ready-to-publish", "published"];
+const canPublish = computed(() => session.value?.role === "admin" && Boolean(session.value.mfaEnabledAt));
+const statusOptions = computed<AdminReviewStatus[]>(() => canPublish.value
+	? ["draft", "in-review", "needs-sources", "ready-to-publish", "published"]
+	: ["draft", "in-review", "needs-sources", "ready-to-publish"]);
 const priorityOptions: AdminPriority[] = ["high", "medium", "low"];
 
 const savingId = ref<string | null>(null);
@@ -27,7 +31,6 @@ async function saveItem(id: string, payload: {
 	assignedTo?: string;
 	blocker?: string | null;
 	priority?: AdminPriority;
-	publishApprovedBy?: string | null;
 	publishApprovalNote?: string | null;
 	publicBallotSummary?: string | null;
 	publicSummary?: string;
@@ -55,6 +58,25 @@ async function saveItem(id: string, payload: {
 	finally {
 		savingId.value = null;
 	}
+}
+
+async function saveContentItem(item: AdminContentItem) {
+	await saveItem(item.id, {
+		assignedTo: item.assignedTo,
+		blocker: item.blocker,
+		priority: item.priority,
+		publicBallotSummary: item.publicBallotSummary,
+		publicSummary: item.publicSummary,
+		...(canPublish.value
+			? {
+					publishApprovalNote: item.publishApprovalNote,
+					published: item.published,
+					status: item.status,
+				}
+			: {
+					status: item.status === "published" ? undefined : item.status,
+				}),
+	});
 }
 
 usePageSeo({
@@ -171,13 +193,17 @@ usePageSeo({
 						</div>
 					</div>
 
-					<form class="space-y-4" @submit.prevent="saveItem(item.id, item)">
+					<form class="space-y-4" @submit.prevent="saveContentItem(item)">
 						<label class="block">
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Status</span>
 							<select
 								v-model="item.status"
+								:disabled="item.status === 'published' && !canPublish"
 								class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							>
+								<option v-if="item.status === 'published' && !canPublish" value="published">
+									published
+								</option>
 								<option v-for="status in statusOptions" :key="status" :value="status">
 									{{ status }}
 								</option>
@@ -235,29 +261,26 @@ usePageSeo({
 							/>
 						</label>
 
-						<label class="text-sm text-app-muted px-4 py-3 border border-app-line rounded-2xl bg-white flex gap-3 items-center dark:text-app-muted-dark dark:border-app-line-dark dark:bg-app-panel-dark">
+						<label v-if="canPublish" class="text-sm text-app-muted px-4 py-3 border border-app-line rounded-2xl bg-white flex gap-3 items-center dark:text-app-muted-dark dark:border-app-line-dark dark:bg-app-panel-dark">
 							<input v-model="item.published" type="checkbox" class="accent-app-accent h-4 w-4">
 							Published on the public site
 						</label>
+						<p v-else class="text-xs text-app-muted leading-5 px-4 py-3 border border-app-line rounded-2xl bg-white dark:text-app-muted-dark dark:border-app-line-dark dark:bg-app-panel-dark">
+							Publishing, unpublishing, and live-content changes require an admin account with multi-factor authentication.
+						</p>
 
-						<div class="p-4 border border-app-line rounded-3xl bg-white/70 space-y-4 dark:border-app-line-dark dark:bg-app-panel-dark/70">
+						<div v-if="canPublish" class="p-4 border border-app-line rounded-3xl bg-white/70 space-y-4 dark:border-app-line-dark dark:bg-app-panel-dark/70">
 							<div>
 								<p class="text-sm text-app-ink font-semibold dark:text-app-text-dark">
 									Publish approval
 								</p>
 								<p class="text-xs text-app-muted leading-5 mt-1 dark:text-app-muted-dark">
-									Publishing requires a named reviewer. Unpublishing clears the approval so a future publish needs fresh signoff.
+									The authenticated admin account is recorded as the reviewer. Unpublishing clears the approval so a future publish needs fresh signoff.
 								</p>
 							</div>
-							<label class="block">
-								<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Approved by</span>
-								<input
-									v-model="item.publishApprovedBy"
-									type="text"
-									class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
-									placeholder="Reviewer name or role"
-								>
-							</label>
+							<p class="text-sm text-app-muted px-4 py-3 border border-app-line rounded-2xl bg-white dark:text-app-muted-dark dark:border-app-line-dark dark:bg-app-panel-dark">
+								Approved by {{ session?.displayName || session?.username }}
+							</p>
 							<label class="block">
 								<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Approval note</span>
 								<textarea
@@ -272,7 +295,7 @@ usePageSeo({
 							</p>
 						</div>
 
-						<button type="submit" class="btn-primary w-full" :disabled="savingId === item.id">
+						<button type="submit" class="btn-primary w-full" :disabled="savingId === item.id || (!canPublish && item.published)">
 							{{ savingId === item.id ? "Saving..." : "Save changes" }}
 						</button>
 					</form>

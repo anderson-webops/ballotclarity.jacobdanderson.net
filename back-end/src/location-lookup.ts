@@ -15,9 +15,11 @@ import type {
 	OfficialResource,
 } from "./types/civic.js";
 import { getOfficialToolsForState, getStateNameForAbbreviation } from "./official-election-tools.js";
+import { containsControlCharacters } from "./text-validation.js";
 
 const zipCodePattern = /^\d{5}(?:-\d{4})?$/;
 const numericFragmentPattern = /^[\d-]+$/;
+export const locationLookupInputMaxLength = 300;
 const myVoterPagePattern = /my voter page/i;
 const pollingPlacePattern = /polling-place|precinct/i;
 const congressSourcePattern = /congress/i;
@@ -479,6 +481,12 @@ export function classifyLookupInput(raw: string): LocationLookupInputKind {
 }
 
 export function validateLookupInput(raw: string) {
+	if (raw.length > locationLookupInputMaxLength)
+		return `Location lookup input must be ${locationLookupInputMaxLength} characters or fewer.`;
+
+	if (containsControlCharacters(raw))
+		return "Location lookup input must be a single line without control characters.";
+
 	if (raw.length < 3)
 		return "Enter at least a street address or ZIP code fragment to continue.";
 

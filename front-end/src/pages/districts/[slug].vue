@@ -187,29 +187,25 @@ usePageSeo({
 								{{ representative.summary }}
 							</p>
 							<div class="mt-5 flex flex-wrap gap-3">
-								<a
+								<SafeExternalLink
 									v-if="isExternalHref(representative.href)"
 									:href="representative.href"
-									target="_blank"
-									rel="noopener noreferrer"
 									class="btn-secondary inline-flex gap-2 items-center"
 								>
 									Open record
 									<span class="i-carbon-launch" />
-								</a>
+								</SafeExternalLink>
 								<NuxtLink v-else :to="buildLookupAwareTarget(representative.href)" class="btn-secondary">
 									Profile
 								</NuxtLink>
-								<a
+								<SafeExternalLink
 									v-if="representative.openstatesUrl"
 									:href="representative.openstatesUrl"
-									target="_blank"
-									rel="noopener noreferrer"
 									class="btn-secondary inline-flex gap-2 items-center"
 								>
 									Provider record
 									<span class="i-carbon-launch" />
-								</a>
+								</SafeExternalLink>
 								<NuxtLink
 									v-if="!isExternalHref(representative.href) && representative.fundingAvailable"
 									:to="buildLookupAwareTarget(`${representative.href}/funding`)"

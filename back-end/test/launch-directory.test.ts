@@ -4,6 +4,7 @@ import { buildLaunchDirectorySnapshot } from "../src/launch-directory.js";
 import { classifyRepresentative } from "../src/representative-classification.js";
 
 test("buildLaunchDirectorySnapshot composes provider-fed launch data without pretending funding crosswalks are complete", async () => {
+	let capturedGoogleCivicSignal: AbortSignal | null | undefined;
 	const snapshot = await buildLaunchDirectorySnapshot({
 		congressClient: {
 			async getMember() {
@@ -36,7 +37,8 @@ test("buildLaunchDirectorySnapshot composes provider-fed launch data without pre
 				];
 			}
 		},
-		fetchImpl: (async () => {
+		fetchImpl: (async (_resource, init) => {
+			capturedGoogleCivicSignal = init?.signal;
 			return new Response(JSON.stringify({
 				elections: [
 					{
@@ -102,6 +104,7 @@ test("buildLaunchDirectorySnapshot composes provider-fed launch data without pre
 	});
 
 	assert.equal(snapshot.upcomingElections.length, 1);
+	assert.ok(capturedGoogleCivicSignal instanceof AbortSignal);
 	assert.equal(snapshot.upcomingElections[0].id, "ga-primary");
 	assert.equal(snapshot.federalRepresentatives[0].bioguideId, "W000790");
 	assert.equal(snapshot.stateRepresentatives[0].name, "Park Cannon");

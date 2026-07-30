@@ -2,11 +2,14 @@ import type { AdminUserRole } from "./types/civic.js";
 import { Buffer } from "node:buffer";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+const adminUsernamePattern = /^[a-z\d](?:[a-z\d._-]{0,62}[a-z\d])?$/u;
+
 export interface AdminSessionTokenPayload {
 	credentialsUpdatedAt: string;
 	displayName: string;
 	expiresAt: number;
 	mfaEnabledAt?: string;
+	passwordChangeRequiredAt?: string;
 	role: AdminUserRole;
 	username: string;
 }
@@ -26,13 +29,21 @@ function signPayload(payload: string, sessionSecret: string) {
 }
 
 export function parseAdminSessionToken(rawValue: string | undefined, sessionSecret: string) {
-	if (!rawValue || !sessionSecret)
+	if (!rawValue || rawValue.length > 4096 || !sessionSecret)
 		return null;
 
 	const [encodedPayload, signature, ...extraParts] = rawValue.split(".");
 
-	if (!encodedPayload || !signature || extraParts.length)
+	if (
+		!encodedPayload
+		|| encodedPayload.length > 3072
+		|| !/^[\w-]+$/u.test(encodedPayload)
+		|| !signature
+		|| !/^[a-f\d]{64}$/u.test(signature)
+		|| extraParts.length
+	) {
 		return null;
+	}
 
 	const expectedSignature = signPayload(encodedPayload, sessionSecret);
 
@@ -43,11 +54,27 @@ export function parseAdminSessionToken(rawValue: string | undefined, sessionSecr
 		const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as Partial<AdminSessionTokenPayload>;
 
 		if (
-			!payload.username
-			|| !payload.displayName
-			|| !payload.credentialsUpdatedAt
+			typeof payload.username !== "string"
+			|| !adminUsernamePattern.test(payload.username)
+			|| typeof payload.displayName !== "string"
+			|| !payload.displayName.trim()
+			|| payload.displayName.length > 200
+			|| typeof payload.credentialsUpdatedAt !== "string"
+			|| payload.credentialsUpdatedAt.length > 64
+			|| !Number.isFinite(Date.parse(payload.credentialsUpdatedAt))
 			|| (payload.role !== "admin" && payload.role !== "editor")
 			|| typeof payload.expiresAt !== "number"
+			|| !Number.isSafeInteger(payload.expiresAt)
+			|| (payload.mfaEnabledAt !== undefined && (
+				typeof payload.mfaEnabledAt !== "string"
+				|| payload.mfaEnabledAt.length > 64
+				|| !Number.isFinite(Date.parse(payload.mfaEnabledAt))
+			))
+			|| (payload.passwordChangeRequiredAt !== undefined && (
+				typeof payload.passwordChangeRequiredAt !== "string"
+				|| payload.passwordChangeRequiredAt.length > 64
+				|| !Number.isFinite(Date.parse(payload.passwordChangeRequiredAt))
+			))
 		) {
 			return null;
 		}

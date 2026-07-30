@@ -1,4 +1,6 @@
 import process from "node:process";
+import { readProviderResponseJson, readProviderResponseText } from "./fetch-response.js";
+import { createFetchTimeoutSignal, resolveFetchTimeoutMs } from "./fetch-timeout.js";
 
 export interface OpenFecPrincipalCommittee {
 	committeeId: string;
@@ -109,7 +111,7 @@ function toNumber(value: number | string | null | undefined) {
 export function createOpenFecClient({
 	apiKey = process.env.OPENFEC_API_KEY?.trim() || process.env.DATA_API_KEY?.trim(),
 	fetchImpl = fetch,
-	timeoutMs = Number(process.env.OPENFEC_FETCH_TIMEOUT_MS || 15000),
+	timeoutMs = resolveFetchTimeoutMs(process.env.OPENFEC_FETCH_TIMEOUT_MS),
 }: OpenFecClientOptions = {}): OpenFecClient | null {
 	const resolvedApiKey = apiKey?.trim();
 
@@ -117,6 +119,7 @@ export function createOpenFecClient({
 		return null;
 
 	const apiKeyValue = resolvedApiKey;
+	const resolvedTimeoutMs = resolveFetchTimeoutMs(timeoutMs);
 
 	async function fetchOpenFec<T>(pathname: string, query: Record<string, string>) {
 		const requestUrl = new URL(pathname, "https://api.open.fec.gov/v1/");
@@ -131,15 +134,15 @@ export function createOpenFecClient({
 			headers: {
 				Accept: "application/json",
 			},
-			signal: AbortSignal.timeout(timeoutMs),
+			signal: createFetchTimeoutSignal(resolvedTimeoutMs),
 		});
 
 		if (!response.ok) {
-			const detail = await response.text();
+			const detail = await readProviderResponseText(response);
 			throw new Error(`OpenFEC request failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ""}`.slice(0, 500));
 		}
 
-		return await response.json() as T;
+		return await readProviderResponseJson<T>(response);
 	}
 
 	return {

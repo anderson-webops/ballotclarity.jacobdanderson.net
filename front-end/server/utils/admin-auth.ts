@@ -18,19 +18,24 @@ import type {
 import { Buffer } from "node:buffer";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import process from "node:process";
-import { createError, deleteCookie, getCookie, readBody, setCookie } from "h3";
+import { createError, deleteCookie, getCookie, setCookie } from "h3";
 import { $fetch, FetchError } from "ofetch";
 import { useRuntimeConfig } from "#imports";
+import { resolveRequestTimeoutMs } from "~/utils/request-timeout";
+import { readBoundedJsonRequestBody } from "./bounded-json-body";
+import { buildForwardedForHeader } from "./proxy-address";
 
 const adminCookieName = process.env.NODE_ENV === "production"
 	? "__Host-ballot_clarity_admin_session"
 	: "ballot_clarity_admin_session";
 const adminSessionMaxAge = 60 * 60 * 12;
 const adminSessionTokenHeaderName = "x-admin-session-token";
+const adminUsernamePattern = /^[a-z\d](?:[a-z\d._-]{0,62}[a-z\d])?$/u;
 
 interface AdminConfig {
 	apiBase: string;
 	apiKey: string;
+	requestTimeoutMs: number;
 	sessionSecret: string;
 }
 
@@ -41,6 +46,7 @@ interface BackendLoginResponse {
 	displayName: string | null;
 	mfaEnabledAt?: string;
 	mfaRequired?: boolean;
+	passwordChangeRequiredAt?: string;
 	role: AdminUserRole | null;
 	username: string | null;
 }
@@ -51,6 +57,7 @@ interface CompleteBackendSessionResponse extends BackendLoginResponse {
 	credentialsUpdatedAt: string;
 	displayName: string;
 	mfaEnabledAt?: string;
+	passwordChangeRequiredAt?: string;
 	role: AdminUserRole;
 	username: string;
 }
@@ -60,6 +67,7 @@ interface AdminSessionPayload {
 	displayName: string;
 	expiresAt: number;
 	mfaEnabledAt?: string;
+	passwordChangeRequiredAt?: string;
 	role: AdminUserRole;
 	username: string;
 }
@@ -80,6 +88,9 @@ function getAdminConfig(event: H3Event): AdminConfig {
 	return {
 		apiBase: process.env.NUXT_ADMIN_API_BASE || process.env.ADMIN_API_BASE || String(runtimeConfig.adminApiBase || ""),
 		apiKey: process.env.NUXT_ADMIN_API_KEY || process.env.ADMIN_API_KEY || String(runtimeConfig.adminApiKey || ""),
+		requestTimeoutMs: resolveRequestTimeoutMs(
+			process.env.ADMIN_API_FETCH_TIMEOUT_MS || Number(runtimeConfig.adminApiFetchTimeoutMs)
+		),
 		sessionSecret: process.env.NUXT_ADMIN_SESSION_SECRET || process.env.ADMIN_SESSION_SECRET || String(runtimeConfig.adminSessionSecret || "")
 	};
 }
@@ -96,15 +107,69 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export function parseAdminUsername(value: unknown) {
+	const username = typeof value === "string" ? value.trim().toLowerCase() : "";
+
+	if (!adminUsernamePattern.test(username)) {
+		throw createError({
+			statusCode: 400,
+			statusMessage: "Admin username is invalid."
+		});
+	}
+
+	return username;
+}
+
+export function parseAdminPassword(value: unknown, fieldLabel: string) {
+	const password = typeof value === "string" ? value : "";
+
+	if (!password || password.length > 256 || password.includes("\0")) {
+		throw createError({
+			statusCode: 400,
+			statusMessage: `${fieldLabel} is invalid.`
+		});
+	}
+
+	return password;
+}
+
+export function parseAdminMfaCode(value: unknown, options: { required?: boolean } = {}) {
+	if ((value === undefined || value === "") && !options.required)
+		return undefined;
+
+	const code = typeof value === "string" ? value.replace(/\s+/gu, "") : "";
+
+	if (!/^\d{6}$/u.test(code)) {
+		throw createError({
+			statusCode: 400,
+			statusMessage: "Admin verification code must contain exactly six digits."
+		});
+	}
+
+	return code;
+}
+
+function parseAdminMfaSecret(value: unknown) {
+	const secret = typeof value === "string" ? value.trim().toUpperCase() : "";
+
+	if (!/^[A-Z2-7]{32}$/u.test(secret)) {
+		throw createError({
+			statusCode: 400,
+			statusMessage: "Admin MFA secret is invalid."
+		});
+	}
+
+	return secret;
+}
+
 function getForwardHeaders(event: H3Event, extraHeaders: Record<string, string> = {}) {
 	const request = event.node?.req;
-	const forwardedFor = normalizeHeaderValue(request?.headers["x-forwarded-for"]);
-	const remoteAddress = request?.socket.remoteAddress;
+	const forwardedFor = request ? buildForwardedForHeader(request) : undefined;
 	const userAgent = normalizeHeaderValue(request?.headers["user-agent"]);
 	const requestId = normalizeHeaderValue(request?.headers["x-request-id"]);
 
 	return {
-		...(forwardedFor ? { "x-forwarded-for": forwardedFor } : remoteAddress ? { "x-forwarded-for": remoteAddress } : {}),
+		...(forwardedFor ? { "x-forwarded-for": forwardedFor } : {}),
 		...(requestId ? { "x-request-id": requestId } : {}),
 		...(userAgent ? { "user-agent": userAgent } : {}),
 		...extraHeaders
@@ -124,7 +189,7 @@ function getAdminDelegationHeaders(event: H3Event): Record<string, string> {
 }
 
 export async function readAdminRequestBody(event: H3Event) {
-	const body = await readBody<unknown>(event);
+	const body = await readBoundedJsonRequestBody(event);
 
 	if (!isRecord(body)) {
 		throw createError({
@@ -163,6 +228,7 @@ function setAdminSessionCookie(event: H3Event, sessionResponse: CompleteBackendS
 		displayName: sessionResponse.displayName,
 		expiresAt: Date.now() + (adminSessionMaxAge * 1000),
 		mfaEnabledAt: sessionResponse.mfaEnabledAt,
+		passwordChangeRequiredAt: sessionResponse.passwordChangeRequiredAt,
 		role: sessionResponse.role,
 		username: sessionResponse.username
 	}, sessionSecret);
@@ -176,14 +242,35 @@ function setAdminSessionCookie(event: H3Event, sessionResponse: CompleteBackendS
 	});
 }
 
+function deleteAdminSessionCookie(event: H3Event) {
+	deleteCookie(event, adminCookieName, {
+		httpOnly: true,
+		path: "/",
+		sameSite: "strict",
+		secure: process.env.NODE_ENV === "production"
+	});
+}
+
 function parseSession(rawValue: string | undefined, sessionSecret: string) {
-	if (!rawValue)
+	if (!rawValue || rawValue.length > 4096)
 		return null;
 
-	const [encodedPayload, signature] = rawValue.split(".");
+	const tokenParts = rawValue.split(".");
 
-	if (!encodedPayload || !signature)
+	if (tokenParts.length !== 2)
 		return null;
+
+	const [encodedPayload, signature] = tokenParts;
+
+	if (
+		!encodedPayload
+		|| encodedPayload.length > 3072
+		|| !/^[\w-]+$/u.test(encodedPayload)
+		|| !signature
+		|| !/^[a-f\d]{64}$/u.test(signature)
+	) {
+		return null;
+	}
 
 	const expectedSignature = signPayload(encodedPayload, sessionSecret);
 
@@ -193,8 +280,31 @@ function parseSession(rawValue: string | undefined, sessionSecret: string) {
 	try {
 		const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as Partial<AdminSessionPayload>;
 
-		if (!payload.username || !payload.displayName || !payload.role || !payload.credentialsUpdatedAt || typeof payload.expiresAt !== "number")
+		if (
+			typeof payload.username !== "string"
+			|| !adminUsernamePattern.test(payload.username)
+			|| typeof payload.displayName !== "string"
+			|| !payload.displayName.trim()
+			|| payload.displayName.length > 200
+			|| (payload.role !== "admin" && payload.role !== "editor")
+			|| typeof payload.credentialsUpdatedAt !== "string"
+			|| payload.credentialsUpdatedAt.length > 64
+			|| !Number.isFinite(Date.parse(payload.credentialsUpdatedAt))
+			|| typeof payload.expiresAt !== "number"
+			|| !Number.isSafeInteger(payload.expiresAt)
+			|| (payload.mfaEnabledAt !== undefined && (
+				typeof payload.mfaEnabledAt !== "string"
+				|| payload.mfaEnabledAt.length > 64
+				|| !Number.isFinite(Date.parse(payload.mfaEnabledAt))
+			))
+			|| (payload.passwordChangeRequiredAt !== undefined && (
+				typeof payload.passwordChangeRequiredAt !== "string"
+				|| payload.passwordChangeRequiredAt.length > 64
+				|| !Number.isFinite(Date.parse(payload.passwordChangeRequiredAt))
+			))
+		) {
 			return null;
+		}
 
 		if (payload.expiresAt <= Date.now())
 			return null;
@@ -238,6 +348,7 @@ export function getAdminSession(event: H3Event): AdminSessionResponse {
 		credentialsUpdatedAt: session.credentialsUpdatedAt,
 		displayName: session.displayName,
 		mfaEnabledAt: session.mfaEnabledAt,
+		passwordChangeRequiredAt: session.passwordChangeRequiredAt,
 		role: session.role,
 		username: session.username
 	};
@@ -250,6 +361,7 @@ function buildAdminSessionResponse(response: CompleteBackendSessionResponse): Ad
 		credentialsUpdatedAt: response.credentialsUpdatedAt,
 		displayName: response.displayName,
 		mfaEnabledAt: response.mfaEnabledAt,
+		passwordChangeRequiredAt: response.passwordChangeRequiredAt,
 		role: response.role,
 		username: response.username
 	};
@@ -292,7 +404,8 @@ export async function getValidatedAdminSession(event: H3Event): Promise<AdminSes
 			{
 				headers: getForwardHeaders(event, {
 					"x-admin-api-key": config.apiKey
-				})
+				}),
+				timeout: config.requestTimeoutMs
 			}
 		);
 
@@ -304,9 +417,7 @@ export async function getValidatedAdminSession(event: H3Event): Promise<AdminSes
 			throw error;
 	}
 
-	deleteCookie(event, adminCookieName, {
-		path: "/"
-	});
+	deleteAdminSessionCookie(event);
 
 	return {
 		authenticated: false,
@@ -337,12 +448,30 @@ export async function requireActiveAdminSession(event: H3Event) {
 	return session;
 }
 
+async function requirePrivilegedAdminSession(event: H3Event) {
+	const session = await requireActiveAdminSession(event);
+
+	if (session.role !== "admin") {
+		throw createError({
+			statusCode: 403,
+			statusMessage: "Only admin users can perform this action."
+		});
+	}
+
+	if (!session.mfaEnabledAt) {
+		throw createError({
+			statusCode: 403,
+			statusMessage: "Enable multi-factor authentication before performing this admin action."
+		});
+	}
+
+	return session;
+}
+
 export function clearAdminSession(event: H3Event): AdminSessionResponse {
 	const currentSession = getAdminSession(event);
 
-	deleteCookie(event, adminCookieName, {
-		path: "/"
-	});
+	deleteAdminSessionCookie(event);
 
 	return {
 		authenticated: false,
@@ -372,8 +501,11 @@ export async function createAdminSession(event: H3Event, username: string, passw
 				password,
 				username
 			},
-			headers: getForwardHeaders(event),
-			method: "POST"
+			headers: getForwardHeaders(event, {
+				"x-admin-api-key": config.apiKey
+			}),
+			method: "POST",
+			timeout: config.requestTimeoutMs
 		});
 	}
 	catch (error) {
@@ -413,13 +545,13 @@ export async function createAdminSession(event: H3Event, username: string, passw
 export async function changeAdminPassword(event: H3Event, body: Record<string, unknown>) {
 	const session = await requireActiveAdminSession(event);
 	const config = getAdminConfig(event);
-	const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
-	const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+	const currentPassword = parseAdminPassword(body.currentPassword, "Current password");
+	const newPassword = parseAdminPassword(body.newPassword, "New password");
 
-	if (!session.username || !currentPassword || !newPassword) {
+	if (!session.username) {
 		throw createError({
 			statusCode: 400,
-			statusMessage: "Current password and new password are required."
+			statusMessage: "Admin username is required."
 		});
 	}
 
@@ -436,7 +568,8 @@ export async function changeAdminPassword(event: H3Event, body: Record<string, u
 				...getAdminDelegationHeaders(event),
 				"x-admin-api-key": config.apiKey
 			}),
-			method: "POST"
+			method: "POST",
+			timeout: config.requestTimeoutMs
 		});
 	}
 	catch (error) {
@@ -483,14 +616,14 @@ export async function createAdminMfaSetup(event: H3Event) {
 export async function enableAdminMfa(event: H3Event, body: Record<string, unknown>) {
 	const session = await requireActiveAdminSession(event);
 	const config = getAdminConfig(event);
-	const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
-	const secret = typeof body.secret === "string" ? body.secret : "";
-	const mfaCode = typeof body.mfaCode === "string" ? body.mfaCode : "";
+	const currentPassword = parseAdminPassword(body.currentPassword, "Current password");
+	const secret = parseAdminMfaSecret(body.secret);
+	const mfaCode = parseAdminMfaCode(body.mfaCode, { required: true });
 
-	if (!session.username || !currentPassword || !secret || !mfaCode) {
+	if (!session.username) {
 		throw createError({
 			statusCode: 400,
-			statusMessage: "Current password, MFA secret, and verification code are required."
+			statusMessage: "Admin username is required."
 		});
 	}
 
@@ -519,13 +652,13 @@ export async function enableAdminMfa(event: H3Event, body: Record<string, unknow
 export async function disableAdminMfa(event: H3Event, body: Record<string, unknown>) {
 	const session = await requireActiveAdminSession(event);
 	const config = getAdminConfig(event);
-	const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
-	const mfaCode = typeof body.mfaCode === "string" ? body.mfaCode : "";
+	const currentPassword = parseAdminPassword(body.currentPassword, "Current password");
+	const mfaCode = parseAdminMfaCode(body.mfaCode, { required: true });
 
-	if (!session.username || !currentPassword || !mfaCode) {
+	if (!session.username) {
 		throw createError({
 			statusCode: 400,
-			statusMessage: "Current password and MFA code are required."
+			statusMessage: "Admin username is required."
 		});
 	}
 
@@ -569,7 +702,8 @@ async function fetchAdminApi<T>(event: H3Event, path: string, options?: {
 			...getAdminDelegationHeaders(event),
 			"x-admin-api-key": config.apiKey
 		}),
-		method: options?.method
+		method: options?.method,
+		timeout: config.requestTimeoutMs
 	});
 }
 
@@ -628,7 +762,7 @@ export async function getAdminContentHistory(event: H3Event, id: string) {
 }
 
 export async function rollbackAdminContent(event: H3Event, id: string, body: Record<string, unknown>) {
-	await requireActiveAdminSession(event);
+	await requirePrivilegedAdminSession(event);
 	return await fetchAdminApi<AdminContentResponse>(event, `/admin/content/${id}/rollback`, {
 		body,
 		method: "POST"
@@ -667,7 +801,7 @@ export async function updateAdminGuidePackage(event: H3Event, id: string, body: 
 }
 
 export async function publishAdminGuidePackage(event: H3Event, id: string, body: Record<string, unknown>) {
-	await requireActiveAdminSession(event);
+	await requirePrivilegedAdminSession(event);
 	return await fetchAdminApi<GuidePackageRecordResponse>(event, `/admin/packages/${id}/publish`, {
 		body,
 		method: "POST"
@@ -675,7 +809,7 @@ export async function publishAdminGuidePackage(event: H3Event, id: string, body:
 }
 
 export async function unpublishAdminGuidePackage(event: H3Event, id: string, body: Record<string, unknown>) {
-	await requireActiveAdminSession(event);
+	await requirePrivilegedAdminSession(event);
 	return await fetchAdminApi<GuidePackageRecordResponse>(event, `/admin/packages/${id}/unpublish`, {
 		body,
 		method: "POST"
@@ -688,7 +822,7 @@ export async function getAdminSourceMonitor(event: H3Event) {
 }
 
 export async function updateAdminSource(event: H3Event, id: string, body: Record<string, unknown>) {
-	await requireActiveAdminSession(event);
+	await requirePrivilegedAdminSession(event);
 	return await fetchAdminApi<AdminSourceMonitorResponse>(event, `/admin/sources/${id}`, {
 		body,
 		method: "PATCH"
@@ -709,14 +843,7 @@ export async function getAdminUsers(event: H3Event) {
 }
 
 export async function createAdminUser(event: H3Event, body: Record<string, unknown>) {
-	const session = await requireActiveAdminSession(event);
-
-	if (session.role !== "admin") {
-		throw createError({
-			statusCode: 403,
-			statusMessage: "Only admin users can manage accounts."
-		});
-	}
+	await requirePrivilegedAdminSession(event);
 
 	return await fetchAdminApi<AdminUsersResponse>(event, "/admin/users", {
 		body,
@@ -725,14 +852,7 @@ export async function createAdminUser(event: H3Event, body: Record<string, unkno
 }
 
 export async function updateAdminUser(event: H3Event, id: string, body: Record<string, unknown>) {
-	const session = await requireActiveAdminSession(event);
-
-	if (session.role !== "admin") {
-		throw createError({
-			statusCode: 403,
-			statusMessage: "Only admin users can manage accounts."
-		});
-	}
+	await requirePrivilegedAdminSession(event);
 
 	return await fetchAdminApi<AdminUsersResponse>(event, `/admin/users/${id}`, {
 		body,

@@ -1,3 +1,5 @@
+import { resolveRequestTimeoutMs } from "~/utils/request-timeout";
+
 interface ElectionSummaryResponse {
 	elections?: Array<{ slug: string }>;
 }
@@ -44,11 +46,11 @@ function unique<T>(values: T[]) {
 	return Array.from(new Set(values));
 }
 
-async function fetchPublicApiJson<T>(apiBase: string, path: string): Promise<T | null> {
+async function fetchPublicApiJson<T>(apiBase: string, path: string, timeout: number): Promise<T | null> {
 	const normalizedPath = path.startsWith("/") ? path : `/${path}`;
 
 	try {
-		return await $fetch<unknown>(`${apiBase}${normalizedPath}`) as T;
+		return await $fetch<unknown>(`${apiBase}${normalizedPath}`, { timeout }) as T;
 	}
 	catch {
 		return null;
@@ -59,6 +61,7 @@ export default defineEventHandler(async (event): Promise<string> => {
 	const origin = getRequestURL(event).origin;
 	const runtimeConfig = useRuntimeConfig(event);
 	const apiBase = String(runtimeConfig.public.apiBase || "").replace(trailingSlashesPattern, "");
+	const apiFetchTimeoutMs = resolveRequestTimeoutMs(runtimeConfig.public.apiFetchTimeoutMs);
 	const siteUrl = String(runtimeConfig.public.siteUrl || origin).replace(trailingSlashesPattern, "");
 	const staticRoutes: string[] = [
 		"/",
@@ -97,16 +100,16 @@ export default defineEventHandler(async (event): Promise<string> => {
 		RepresentativeDirectoryResponse | null,
 		SourcesDirectoryResponse | null,
 	] = await Promise.all([
-		fetchPublicApiJson<ElectionSummaryResponse>(apiBase, "/elections"),
-		fetchPublicApiJson<JurisdictionSummaryResponse>(apiBase, "/jurisdictions"),
-		fetchPublicApiJson<RepresentativeDirectoryResponse>(apiBase, "/representatives"),
-		fetchPublicApiJson<SourcesDirectoryResponse>(apiBase, "/sources"),
+		fetchPublicApiJson<ElectionSummaryResponse>(apiBase, "/elections", apiFetchTimeoutMs),
+		fetchPublicApiJson<JurisdictionSummaryResponse>(apiBase, "/jurisdictions", apiFetchTimeoutMs),
+		fetchPublicApiJson<RepresentativeDirectoryResponse>(apiBase, "/representatives", apiFetchTimeoutMs),
+		fetchPublicApiJson<SourcesDirectoryResponse>(apiBase, "/sources", apiFetchTimeoutMs),
 	]);
 
 	const electionSummaries: Array<{ slug: string }> = electionsResponse?.elections ?? [];
 	const primaryElectionSlug: string | undefined = electionSummaries[0]?.slug;
 	const ballotResponse: BallotRouteResponse | null = primaryElectionSlug
-		? await fetchPublicApiJson<BallotRouteResponse>(apiBase, `/ballot?election=${encodeURIComponent(primaryElectionSlug)}`)
+		? await fetchPublicApiJson<BallotRouteResponse>(apiBase, `/ballot?election=${encodeURIComponent(primaryElectionSlug)}`, apiFetchTimeoutMs)
 		: null;
 	const contests: BallotContestRoute[] = ballotResponse?.election?.contests ?? [];
 	const candidateRoutes: string[] = unique(

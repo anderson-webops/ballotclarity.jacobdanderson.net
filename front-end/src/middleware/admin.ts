@@ -20,4 +20,7 @@ export default defineNuxtRouteMiddleware(async (to) => {
 			}
 		});
 	}
+
+	if (session.passwordChangeRequiredAt && to.path !== "/admin/account")
+		return navigateTo("/admin/account");
 });

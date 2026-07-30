@@ -1,6 +1,8 @@
 import type { Request } from "express";
 import type { LocationGuessCapability, LocationGuessMode } from "./types/civic.js";
+import { validateHeaderName } from "node:http";
 import process from "node:process";
+import { containsControlCharacters } from "./text-validation.js";
 
 export interface LocationGuessInput {
 	city?: string;
@@ -17,9 +19,14 @@ interface ProxyHeaderConfig {
 	regionHeaders: string[];
 }
 
+const postalCodePattern = /^\d{5}(?:-\d{4})?$/u;
+const maximumProxyHeaderNamesPerField = 16;
+const truthyEnvPattern = /^(?:1|true|yes|on)$/iu;
+
 export interface LocationGuessServiceOptions {
 	mode?: LocationGuessMode | null;
 	proxyHeaders?: Partial<ProxyHeaderConfig>;
+	trustProxyHeaders?: boolean;
 }
 
 export interface LocationGuessService {
@@ -41,11 +48,22 @@ function normalizeMode(value?: string | null): LocationGuessMode {
 	}
 }
 
+function isValidHeaderName(value: string) {
+	try {
+		validateHeaderName(value);
+		return true;
+	}
+	catch {
+		return false;
+	}
+}
+
 function parseHeaderList(value?: string | null) {
 	return (value || "")
 		.split(",")
 		.map(item => item.trim())
-		.filter(Boolean);
+		.filter(item => item.length <= 128 && isValidHeaderName(item))
+		.slice(0, maximumProxyHeaderNamesPerField);
 }
 
 function readHeaderList(
@@ -54,7 +72,7 @@ function readHeaderList(
 	override?: string[]
 ) {
 	if (override)
-		return override.map(item => item.trim()).filter(Boolean);
+		return parseHeaderList(override.join(","));
 
 	const envValue = process.env[envPlural] ?? process.env[envSingular];
 
@@ -72,13 +90,23 @@ function readRequestHeader(request: Request, names: string[]) {
 	return undefined;
 }
 
-function buildProxyHeaderGuess(request: Request, proxyHeaders: ProxyHeaderConfig) {
-	const country = readRequestHeader(request, proxyHeaders.countryHeaders);
-	const postalCode = readRequestHeader(request, proxyHeaders.postalCodeHeaders);
-	const city = readRequestHeader(request, proxyHeaders.cityHeaders);
-	const region = readRequestHeader(request, proxyHeaders.regionHeaders);
+function normalizeGeoHeaderValue(value: string | undefined, maximumLength: number) {
+	const normalized = value?.replace(/\s+/gu, " ").trim() ?? "";
 
-	if (country && country.toUpperCase() !== "US")
+	if (!normalized || normalized.length > maximumLength || containsControlCharacters(normalized))
+		return undefined;
+
+	return normalized;
+}
+
+function buildProxyHeaderGuess(request: Request, proxyHeaders: ProxyHeaderConfig) {
+	const country = normalizeGeoHeaderValue(readRequestHeader(request, proxyHeaders.countryHeaders), 2)?.toUpperCase();
+	const rawPostalCode = normalizeGeoHeaderValue(readRequestHeader(request, proxyHeaders.postalCodeHeaders), 10);
+	const postalCode = rawPostalCode && postalCodePattern.test(rawPostalCode) ? rawPostalCode : undefined;
+	const city = normalizeGeoHeaderValue(readRequestHeader(request, proxyHeaders.cityHeaders), 120);
+	const region = normalizeGeoHeaderValue(readRequestHeader(request, proxyHeaders.regionHeaders), 64);
+
+	if (country && country !== "US")
 		return null;
 
 	if (postalCode) {
@@ -142,17 +170,23 @@ export function createLocationGuessService(
 			options.proxyHeaders?.regionHeaders
 		)
 	};
-	const varyHeaders = Array.from(new Set([
+	const configuredVaryHeaders = Array.from(new Set([
 		...proxyHeaders.postalCodeHeaders,
 		...proxyHeaders.cityHeaders,
 		...proxyHeaders.regionHeaders,
 		...proxyHeaders.countryHeaders
 	]));
+	const trustProxyHeaders = options.trustProxyHeaders
+		?? (options.proxyHeaders
+			? true
+			: truthyEnvPattern.test(process.env.LOCATION_GUESS_PROXY_HEADERS_TRUSTED?.trim() ?? ""));
 	const canGuessOnLoad = mode === "proxy_headers"
+		&& trustProxyHeaders
 		&& (
 			proxyHeaders.postalCodeHeaders.length > 0
 			|| (proxyHeaders.cityHeaders.length > 0 && proxyHeaders.regionHeaders.length > 0)
 		);
+	const varyHeaders = canGuessOnLoad ? configuredVaryHeaders : [];
 
 	return {
 		buildGuess(request) {

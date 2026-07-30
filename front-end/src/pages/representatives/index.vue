@@ -234,16 +234,14 @@ usePageSeo({
 								<NuxtLink v-if="!representativeLinkIsExternal(representative.href)" :to="buildLookupAwareTarget(representative.href)" class="btn-secondary">
 									Profile
 								</NuxtLink>
-								<a
+								<SafeExternalLink
 									v-else
 									:href="representative.href"
-									target="_blank"
-									rel="noopener noreferrer"
 									class="btn-secondary inline-flex gap-2 items-center"
 								>
 									Open record
 									<span class="i-carbon-launch" />
-								</a>
+								</SafeExternalLink>
 								<NuxtLink :to="buildLookupAwareTarget(`/districts/${representative.districtSlug}`)" class="btn-secondary">
 									District page
 								</NuxtLink>

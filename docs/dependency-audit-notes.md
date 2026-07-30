@@ -1,42 +1,21 @@
 # Dependency Audit Notes
 
-## 2026-06-12 Nuxt/Vite/esbuild advisory
+## 2026-07-30 supported dependency state
 
-`npm audit --workspaces` currently reports a high-severity advisory chain through Nuxt's Vite toolchain:
+The earlier Nuxt/Vite/esbuild advisory chain is resolved on the supported Nuxt 4 dependency line.
 
-- `esbuild` versions `0.17.0 - 0.28.0`
-- `vite` versions `4.2.0-beta.0 - 8.0.3`
-- Nuxt's `@nuxt/vite-builder`, `vite-node`, `vite-plugin-inspect`, and `vite-plugin-vue-tracer`
+- The clean lockfile install resolves `nuxt@4.5.1`.
+- Nuxt's builder and related development tools resolve `vite@8.1.5`.
+- Vite, Nitro, Unhead, Unplugin, and `tsx` resolve `esbuild@0.28.1`.
+- `npm audit --workspaces`, `npm audit --workspaces --omit=dev`, and the repository's zero-exception audit wrapper report zero vulnerabilities.
+- `npm outdated --workspaces --include-workspace-root --long` reports no compatible wanted updates. The listed latest versions are unsupported next-major lines for Node types and TypeScript, plus an H3 release candidate.
+- `npm ci --include=optional` and the native-binding verifier confirm that the committed lockfile installs the expected platform packages, including Linux ARM64 bindings.
+- `npm run verify:backend-lockfile` confirms the separately committed backend lockfile remains independently installable under its exact install-script policy.
+- Strict install-script enforcement makes clean installation fail if either dependency tree gains an unreviewed lifecycle script.
+- The local `vendor/archiver-nitro-compat` package preserves Nitro 2's default factory interface while delegating to `archiver@8.0.0`, removing the vulnerable Archiver 7 / Glob 10 / Minimatch 9 / Brace Expansion 2 chain.
 
-The local audit output says the available forced fix would install `nuxt@2.18.1`, which is a breaking downgrade from the Nuxt 4 application stack and is not an acceptable remediation.
+Nitro 2.13.4 still imports Archiver through the default factory removed in Archiver 8. The compatibility package is deliberately narrow, directly tested, and must be removed when Nitro adopts Archiver 8 or a later supported API. Clean install, full and production audits, build, and browser gates cover this bridge.
 
-Do not force the Nuxt downgrade. Revisit this when Nuxt publishes a compatible dependency graph that resolves the Vite/esbuild advisory without downgrading Nuxt or moving the app onto an unsupported Vite major.
+The supported top-level dependency tree passes `npm ls --workspaces --include-workspace-root`. npm 11's diagnostic-only `npm ls --all` additionally labels two non-active optional edges as invalid: `@bomb.sh/tab` sees the hoisted `cac@7` outside its explicitly optional `cac@6` adapter range, and Vite's nested Rolldown sees Nuxt's hoisted WASM fallback while each Rolldown version retains its exact platform-native binding. Neither edge runs in the production path; the clean install, production build, and Linux ARM64 native-binding gate validate the active dependency paths without forcing unsupported transitive versions.
 
-Attempted local remediation:
-
-- A generic `esbuild@0.28.1` override did not remove the vulnerable root `node_modules/esbuild@0.27.7` used by `vite@7.3.5`.
-- A Vite 8 override can remove the audit finding in a scratch install, but Nuxt 4.4.8 still declares Vite 7 compatibility and npm marks the resulting tree invalid. Do not ship that override without explicit Nuxt support and a full validation pass.
-
-Current mitigation:
-
-- Keep `npm audit --workspaces` in the validation notes as a known upstream limitation until Nuxt's supported Vite line resolves the advisory.
-- Continue running `npm ci`, lint, typecheck, build, unit tests, e2e smoke, and accessibility checks before release.
-
-## 2026-06-13 verification
-
-The current supported dependency graph remains blocked on the same upstream chain:
-
-- `nuxt@4.4.8` is the latest Nuxt release available to this repo.
-- `@nuxt/vite-builder@4.4.8` declares `vite@^7.3.3`.
-- `vite@7.3.5` is the latest Vite 7 release and still declares `esbuild@^0.27.0`.
-- `vite@8.0.16` removes the vulnerable `esbuild` edge, but Nuxt's builder has not moved its declared dependency range to Vite 8.
-
-Attempted remediation on this date:
-
-- A root `esbuild@0.28.1` override did not change the Vite dependency edge.
-- A nested `vite -> esbuild@0.28.1` override did not change the Vite dependency edge.
-- A root `vite@8.0.16` override did not change Nuxt's locked Vite 7 edge in the workspace lockfile.
-
-Safe change made:
-
-- Updated `vue-tsc` from `3.3.4` to `3.3.5`, the current wanted/latest release, so the non-audit dependency freshness check is clean.
+The production baseline remains Node 24.18.0 LTS with npm 11.16.0. Node 26 types, TypeScript 7, and H3 2 RC are intentionally not promoted until their corresponding runtime/framework lines are supported by this application and pass the full release gate.

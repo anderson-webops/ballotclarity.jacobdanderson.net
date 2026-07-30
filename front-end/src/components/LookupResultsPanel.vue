@@ -304,16 +304,14 @@ function getRepresentativePresentation(match: NationwideLookupResultContext["rep
 						<span class="i-carbon-arrow-right" />
 						{{ lookupPresentation.guideActionLabel }}
 					</button>
-					<a
+					<SafeExternalLink
 						v-else-if="action.url"
 						:href="action.url"
-						target="_blank"
-						rel="noopener noreferrer"
 						class="btn-secondary"
 					>
 						<span class="i-carbon-launch" />
 						Open official tool
-					</a>
+					</SafeExternalLink>
 				</div>
 			</div>
 		</div>
@@ -408,16 +406,14 @@ function getRepresentativePresentation(match: NationwideLookupResultContext["rep
 									<p class="text-sm text-app-muted leading-6 dark:text-app-muted-dark">
 										{{ [candidate.party, candidate.office].filter(Boolean).join(' · ') }}
 									</p>
-									<a
+									<SafeExternalLink
 										v-if="candidate.candidateUrl"
 										:href="candidate.candidateUrl"
-										target="_blank"
-										rel="noopener noreferrer"
 										class="text-app-accent underline underline-offset-3 inline-flex gap-2 items-center"
 									>
 										Candidate link
 										<span class="i-carbon-launch" />
-									</a>
+									</SafeExternalLink>
 								</div>
 							</li>
 						</ul>
@@ -447,16 +443,14 @@ function getRepresentativePresentation(match: NationwideLookupResultContext["rep
 					<p class="text-sm text-app-muted leading-6 mt-3 dark:text-app-muted-dark">
 						{{ preview.disclaimer }}
 					</p>
-					<a
+					<SafeExternalLink
 						v-if="preview.verificationResource"
 						:href="preview.verificationResource.url"
-						target="_blank"
-						rel="noopener noreferrer"
 						class="text-sm text-app-accent mt-3 underline underline-offset-3 inline-flex gap-2 items-center"
 					>
 						{{ preview.verificationResourceLabel || `Verify with ${preview.verificationResource.label}` }}
 						<span class="i-carbon-launch" />
-					</a>
+					</SafeExternalLink>
 					<div class="mt-4 gap-3 grid md:grid-cols-2">
 						<article
 							v-for="contest in preview.contests.slice(0, 6)"
@@ -493,16 +487,14 @@ function getRepresentativePresentation(match: NationwideLookupResultContext["rep
 								<p v-if="contest.referendum.responses.length">
 									Responses: {{ contest.referendum.responses.join(', ') }}
 								</p>
-								<a
+								<SafeExternalLink
 									v-if="contest.referendum.url"
 									:href="contest.referendum.url"
-									target="_blank"
-									rel="noopener noreferrer"
 									class="text-app-accent underline underline-offset-3 inline-flex gap-2 items-center"
 								>
 									Open measure record
 									<span class="i-carbon-launch" />
-								</a>
+								</SafeExternalLink>
 							</div>
 							<p v-if="contest.sourceLabels.length" class="text-xs text-app-muted leading-5 mt-3 dark:text-app-muted-dark">
 								Source: {{ contest.sourceLabels.join(', ') }}
@@ -562,16 +554,14 @@ function getRepresentativePresentation(match: NationwideLookupResultContext["rep
 									<p>{{ getRepresentativePresentation(match).officeDisplayLabel }}</p>
 								</div>
 							</div>
-							<a
+							<SafeExternalLink
 								v-if="match.openstatesUrl"
 								:href="match.openstatesUrl"
-								target="_blank"
-								rel="noopener noreferrer"
 								class="text-app-accent underline underline-offset-3 inline-flex gap-2 items-center"
 							>
 								Open record
 								<span v-if="isExternalHref(match.openstatesUrl)" class="i-carbon-launch" />
-							</a>
+							</SafeExternalLink>
 						</li>
 					</ul>
 				</div>

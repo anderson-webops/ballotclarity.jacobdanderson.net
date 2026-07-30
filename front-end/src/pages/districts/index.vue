@@ -250,17 +250,15 @@ function buildLookupAwareTarget(path: string) {
 							v-if="getDistrictRepresentatives(district.slug).length"
 							class="group relative"
 						>
-							<a
+							<SafeExternalLink
 								v-if="getDistrictRepresentativeBadgeHref(district) && isExternalHref(getDistrictRepresentativeBadgeHref(district) ?? '')"
 								:href="getDistrictRepresentativeBadgeHref(district)"
 								:title="getDistrictRepresentativeBadgeTitle(district)"
-								target="_blank"
-								rel="noopener noreferrer"
 								class="text-[11px] text-app-accent font-semibold px-2.5 py-1 border border-app-accent/22 rounded-full bg-app-accent/8 inline-flex gap-1.5 transition items-center dark:text-[#9ed4e3] dark:border-app-accent/28 hover:border-app-accent/38 dark:bg-app-accent/12 hover:bg-app-accent/12 focus-ring"
 							>
 								<span class="rounded-full bg-current h-1.5 w-1.5" />
 								{{ getDistrictRepresentativeCountLabel(district) }}
-							</a>
+							</SafeExternalLink>
 							<NuxtLink
 								v-else-if="getDistrictRepresentativeBadgeHref(district)"
 								:to="buildLookupAwareTarget(getDistrictRepresentativeBadgeHref(district) ?? district.href)"
@@ -281,11 +279,9 @@ function buildLookupAwareTarget(path: string) {
 										v-for="representative in getDistrictRepresentativePopoverLinks(district.slug)"
 										:key="representative.href"
 									>
-										<a
+										<SafeExternalLink
 											v-if="representative.external"
 											:href="representative.href"
-											target="_blank"
-											rel="noopener noreferrer"
 											class="px-3 py-2 rounded-xl bg-app-bg/70 block pointer-events-auto transition dark:bg-app-bg-dark/70 hover:bg-app-bg focus-ring dark:hover:bg-app-bg-dark"
 										>
 											<p class="text-sm text-app-ink font-semibold dark:text-app-text-dark">
@@ -294,7 +290,7 @@ function buildLookupAwareTarget(path: string) {
 											<p class="text-xs text-app-muted mt-1 dark:text-app-muted-dark">
 												{{ representative.party }} · {{ representative.officeDisplayLabel }}
 											</p>
-										</a>
+										</SafeExternalLink>
 										<NuxtLink
 											v-else
 											:to="buildLookupAwareTarget(representative.href)"
@@ -337,16 +333,14 @@ function buildLookupAwareTarget(path: string) {
 						<NuxtLink :to="buildLookupAwareTarget(district.href)" class="btn-primary">
 							Open district page
 						</NuxtLink>
-						<a
+						<SafeExternalLink
 							v-if="getDistrictRepresentatives(district.slug).length && isExternalHref(getDistrictRepresentatives(district.slug)[0]?.href ?? '')"
 							:href="getDistrictRepresentatives(district.slug)[0]?.href"
-							target="_blank"
-							rel="noopener noreferrer"
 							class="btn-secondary inline-flex gap-2 items-center"
 						>
 							Open record
 							<span class="i-carbon-launch" />
-						</a>
+						</SafeExternalLink>
 						<NuxtLink
 							v-else-if="getDistrictRepresentatives(district.slug).length"
 							:to="buildLookupAwareTarget(getDistrictRepresentatives(district.slug)[0]?.href ?? '/representatives')"
@@ -354,16 +348,14 @@ function buildLookupAwareTarget(path: string) {
 						>
 							Open representative
 						</NuxtLink>
-						<a
+						<SafeExternalLink
 							v-if="getDistrictRepresentatives(district.slug).length && getDistrictRepresentatives(district.slug)[0]?.openstatesUrl"
 							:href="getDistrictRepresentatives(district.slug)[0]?.openstatesUrl"
-							target="_blank"
-							rel="noopener noreferrer"
 							class="btn-secondary inline-flex gap-2 items-center"
 						>
 							Provider record
 							<span class="i-carbon-launch" />
-						</a>
+						</SafeExternalLink>
 					</div>
 				</article>
 			</section>

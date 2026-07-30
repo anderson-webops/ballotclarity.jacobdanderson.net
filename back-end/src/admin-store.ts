@@ -104,6 +104,7 @@ export interface ContentPatch {
 }
 
 export interface CorrectionPatch {
+	auditActor?: AdminAuditActor;
 	contentId?: string | null;
 	nextStep?: string;
 	priority?: AdminPriority;
@@ -111,6 +112,7 @@ export interface CorrectionPatch {
 }
 
 export interface SourcePatch {
+	auditActor?: AdminAuditActor;
 	health?: AdminSourceHealth;
 	nextCheckAt?: string;
 	note?: string;
@@ -210,11 +212,12 @@ interface UserRow {
 	last_login_at: string | null;
 	mfa_enabled_at: string | null;
 	mfa_secret: string | null;
+	password_change_required_at: string | null;
 	password_hash: string;
 	updated_at: string;
 }
 
-const adminUserSelectColumns = "id, username, display_name, role, created_at, credentials_updated_at, disabled_at, last_login_at, mfa_secret, mfa_enabled_at, password_hash, updated_at";
+const adminUserSelectColumns = "id, username, display_name, role, created_at, credentials_updated_at, disabled_at, last_login_at, mfa_secret, mfa_enabled_at, password_change_required_at, password_hash, updated_at";
 
 interface ContentRow {
 	id: string;
@@ -385,7 +388,224 @@ export function normalizeAdminPassword(password: string) {
 	if (normalized.length < 12)
 		throw new Error("Admin passwords must be at least 12 characters.");
 
+	if (normalized.length > 256)
+		throw new Error("Admin passwords must be 256 characters or fewer.");
+
+	if (normalized.includes("\0"))
+		throw new Error("Admin password contains an invalid control character.");
+
 	return normalized;
+}
+
+export function normalizeAdminUsername(username: string) {
+	const normalized = username.trim().toLowerCase();
+
+	if (!/^[a-z\d](?:[a-z\d._-]{0,62}[a-z\d])?$/u.test(normalized))
+		throw new Error("Admin usernames must be 1 to 64 characters and use only letters, numbers, periods, underscores, or hyphens.");
+
+	return normalized;
+}
+
+export function normalizeAdminDisplayName(displayName: string) {
+	const normalized = displayName.trim();
+
+	if (!normalized || normalized.length > 200)
+		throw new Error("Admin display names must be 1 to 200 characters.");
+
+	if (Array.from(normalized).some((character) => {
+		const codePoint = character.codePointAt(0) ?? 0;
+		return codePoint <= 31 || codePoint === 127;
+	})) {
+		throw new Error("Admin display name contains an invalid control character.");
+	}
+
+	return normalized;
+}
+
+export function validateAdminUserRole(role: unknown): asserts role is AdminUserRole {
+	if (role !== "admin" && role !== "editor")
+		throw new Error("Role must be either admin or editor.");
+}
+
+const validAdminPriorities = new Set<AdminPriority>(["high", "medium", "low"]);
+const validAdminCorrectionStatuses = new Set<AdminCorrectionStatus>([
+	"new",
+	"triaged",
+	"researching",
+	"resolved"
+]);
+const validAdminReviewStatuses = new Set<AdminReviewStatus>([
+	"draft",
+	"in-review",
+	"needs-sources",
+	"ready-to-publish",
+	"published"
+]);
+const validAdminSourceHealthValues = new Set<AdminSourceHealth>([
+	"healthy",
+	"incident",
+	"review-soon",
+	"stale"
+]);
+
+function assertBoundedAdminText(label: string, value: string | null | undefined, maximumLength: number) {
+	if (value === undefined || value === null)
+		return;
+
+	if (value.includes("\0"))
+		throw new Error(`${label} contains an invalid control character.`);
+
+	if (value.length > maximumLength)
+		throw new Error(`${label} must be ${maximumLength.toLocaleString("en-US")} characters or fewer.`);
+}
+
+export function validateContentPatch(patch: ContentPatch) {
+	if (patch.priority !== undefined && !validAdminPriorities.has(patch.priority))
+		throw new Error("Content priority is invalid.");
+
+	if (patch.status !== undefined && !validAdminReviewStatuses.has(patch.status))
+		throw new Error("Content status is invalid.");
+
+	assertBoundedAdminText("Content assignee", patch.assignedTo, 200);
+	assertBoundedAdminText("Content blocker", patch.blocker, 2_000);
+	assertBoundedAdminText("Publish approval reviewer", patch.publishApprovedBy, 200);
+	assertBoundedAdminText("Publish approval note", patch.publishApprovalNote, 5_000);
+	assertBoundedAdminText("Public ballot summary", patch.publicBallotSummary, 3_000);
+	assertBoundedAdminText("Public page summary", patch.publicSummary, 10_000);
+}
+
+export function validateCorrectionPatch(patch: CorrectionPatch) {
+	if (patch.priority !== undefined && !validAdminPriorities.has(patch.priority))
+		throw new Error("Correction priority is invalid.");
+
+	if (patch.status !== undefined && !validAdminCorrectionStatuses.has(patch.status))
+		throw new Error("Correction status is invalid.");
+
+	assertBoundedAdminText("Linked content id", patch.contentId, 256);
+	assertBoundedAdminText("Correction next step", patch.nextStep, 2_000);
+}
+
+export function validateSourcePatch(patch: SourcePatch) {
+	if (patch.health !== undefined && !validAdminSourceHealthValues.has(patch.health))
+		throw new Error("Source health is invalid.");
+
+	assertBoundedAdminText("Next source check", patch.nextCheckAt, 64);
+	assertBoundedAdminText("Source note", patch.note, 2_000);
+	assertBoundedAdminText("Source owner", patch.owner, 200);
+
+	if (patch.nextCheckAt !== undefined && !Number.isFinite(Date.parse(patch.nextCheckAt)))
+		throw new Error("Next source check must be a valid timestamp.");
+}
+
+export function validateContentSnapshotForPersistence(snapshot: AdminContentSnapshot) {
+	if (!validAdminPriorities.has(snapshot.priority))
+		throw new Error("Content priority is invalid.");
+
+	if (!validAdminReviewStatuses.has(snapshot.status))
+		throw new Error("Content status is invalid.");
+
+	assertBoundedAdminText("Content assignee", snapshot.assignedTo, 200);
+	assertBoundedAdminText("Content blocker", snapshot.blocker, 2_000);
+	assertBoundedAdminText("Publish approval reviewer", snapshot.publishApprovedBy, 200);
+	assertBoundedAdminText("Publish approval note", snapshot.publishApprovalNote, 5_000);
+	assertBoundedAdminText("Public ballot summary", snapshot.publicBallotSummary, 3_000);
+	assertBoundedAdminText("Public page summary", snapshot.publicSummary, 10_000);
+
+	if (snapshot.published && snapshot.status !== "published")
+		throw new Error("Published content must use the published status.");
+
+	if (!snapshot.published && snapshot.status === "published")
+		throw new Error("Unpublished content cannot use the published status.");
+
+	if (snapshot.published && snapshot.blocker)
+		throw new Error("Content blockers must be resolved before publication.");
+
+	if (snapshot.published && !snapshot.publishApprovedBy?.trim())
+		throw new Error("Publish approval reviewer is required before content can be published.");
+
+	if (snapshot.published && !snapshot.publishApprovalNote?.trim())
+		throw new Error("Publish approval note is required before content can be published.");
+}
+
+const validGuidePackageStatuses = new Set<GuidePackageStatus>([
+	"draft",
+	"in_review",
+	"ready_to_publish",
+	"published"
+]);
+const validGuidePackageReviewRecommendations = new Set<GuidePackageReviewRecommendation>([
+	"publish",
+	"publish_with_warnings",
+	"needs_revision",
+	"do_not_publish"
+]);
+
+export interface GuidePackagePersistenceState {
+	coverageLimits: string[];
+	coverageNotes: string[];
+	draftedAt: string;
+	publishedAt: string | null;
+	reviewRecommendation: GuidePackageReviewRecommendation | null;
+	reviewNotes: string | null;
+	reviewedAt: string | null;
+	reviewer: string | null;
+	status: GuidePackageStatus;
+}
+
+function assertValidIsoTimestamp(label: string, value: string | null) {
+	if (value !== null && !Number.isFinite(Date.parse(value)))
+		throw new Error(`${label} must be a valid timestamp.`);
+}
+
+export function validateGuidePackagePersistenceState(state: GuidePackagePersistenceState) {
+	if (!validGuidePackageStatuses.has(state.status))
+		throw new Error("Guide package status is invalid.");
+
+	if (
+		state.reviewRecommendation !== null
+		&& !validGuidePackageReviewRecommendations.has(state.reviewRecommendation)
+	) {
+		throw new Error("Guide package review recommendation is invalid.");
+	}
+
+	assertBoundedAdminText("Guide package reviewer", state.reviewer, 200);
+	assertBoundedAdminText("Guide package review notes", state.reviewNotes, 5_000);
+	assertValidIsoTimestamp("Guide package drafted time", state.draftedAt);
+	assertValidIsoTimestamp("Guide package reviewed time", state.reviewedAt);
+	assertValidIsoTimestamp("Guide package published time", state.publishedAt);
+
+	for (const [label, entries] of [
+		["Coverage limits", state.coverageLimits],
+		["Coverage notes", state.coverageNotes]
+	] as const) {
+		if (entries.length > 50 || entries.some(entry => typeof entry !== "string" || entry.length > 1_000 || entry.includes("\0")))
+			throw new Error(`${label} must contain at most 50 bounded text entries.`);
+
+		if (entries.join("").length > 10_000)
+			throw new Error(`${label} entries are too long.`);
+	}
+
+	const isReadyOrPublished = state.status === "ready_to_publish" || state.status === "published";
+	const recommendationIsPublishReady = state.reviewRecommendation === "publish"
+		|| state.reviewRecommendation === "publish_with_warnings";
+
+	if (isReadyOrPublished && !state.reviewer?.trim())
+		throw new Error("Guide package reviewer is required before promotion.");
+
+	if (isReadyOrPublished && !state.reviewNotes?.trim())
+		throw new Error("Guide package review notes are required before promotion.");
+
+	if (isReadyOrPublished && !state.reviewedAt)
+		throw new Error("Guide package review time is required before promotion.");
+
+	if (isReadyOrPublished && !recommendationIsPublishReady)
+		throw new Error("Guide package review recommendation must approve publication before promotion.");
+
+	if (state.status === "published" && !state.publishedAt)
+		throw new Error("Guide package publication time is required for published packages.");
+
+	if (state.status !== "published" && state.publishedAt)
+		throw new Error("Only published guide packages may retain a publication time.");
 }
 
 export function nextAdminCredentialTimestamp(previous?: string | null) {
@@ -412,6 +632,7 @@ function rowToUser(row: UserRow): AdminUser {
 		id: row.id,
 		lastLoginAt: row.last_login_at || undefined,
 		mfaEnabledAt: row.mfa_enabled_at || undefined,
+		passwordChangeRequiredAt: row.password_change_required_at || undefined,
 		role: row.role,
 		username: row.username
 	};
@@ -810,7 +1031,7 @@ export function defaultContentSeed(): AdminContentItem[] {
 			publishApprovedBy: "Editorial review",
 			publishApprovalNote: "Approved only for the official-logistics guide shell; contest, candidate, and measure content remains unpublished until locally verified.",
 			sourceCoverage: `${demoElection.contests.length} contest sections with official notices and guide freshness metadata attached.`,
-			status: "in-review",
+			status: "published",
 			summary: "Cross-checking the Fulton County launch profile, official office links, and public-status language before the next public refresh.",
 			title: "Fulton County launch coverage profile",
 			updatedAt: demoElection.updatedAt
@@ -881,6 +1102,7 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 	ensureColumn(database, "admin_users", "disabled_at", "TEXT");
 	ensureColumn(database, "admin_users", "mfa_secret", "TEXT");
 	ensureColumn(database, "admin_users", "mfa_enabled_at", "TEXT");
+	ensureColumn(database, "admin_users", "password_change_required_at", "TEXT");
 	ensureColumn(database, "admin_content", "public_summary", "TEXT");
 	ensureColumn(database, "admin_content", "ballot_summary", "TEXT");
 	ensureColumn(database, "admin_content", "publish_approved_by", "TEXT");
@@ -1180,6 +1402,12 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 
 	if (!usersCount && bootstrapUsername && bootstrapPassword) {
 		const now = new Date().toISOString();
+		const normalizedBootstrapUsername = normalizeAdminUsername(bootstrapUsername);
+		const normalizedBootstrapDisplayName = normalizeAdminDisplayName(bootstrapDisplayName);
+		const normalizedBootstrapPassword = normalizeAdminPassword(bootstrapPassword);
+
+		validateAdminUserRole(bootstrapRole);
+
 		database.prepare(`
 			INSERT INTO admin_users (
 				id,
@@ -1191,18 +1419,20 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 				credentials_updated_at,
 				mfa_secret,
 				mfa_enabled_at,
+				password_change_required_at,
 				updated_at,
 				disabled_at,
 				last_login_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(
-			`user-${bootstrapUsername}`,
-			bootstrapUsername.trim(),
-			bootstrapDisplayName,
+			`user-${normalizedBootstrapUsername}`,
+			normalizedBootstrapUsername,
+			normalizedBootstrapDisplayName,
 			bootstrapRole,
-			hashPassword(bootstrapPassword),
+			hashPassword(normalizedBootstrapPassword),
 			now,
 			now,
+			null,
 			null,
 			null,
 			now,
@@ -1224,12 +1454,11 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 	}
 
 	function createUser(input: CreateUserInput): AdminUser {
-		const username = input.username.trim().toLowerCase();
-		const displayName = input.displayName.trim();
+		const username = normalizeAdminUsername(input.username);
+		const displayName = normalizeAdminDisplayName(input.displayName);
 		const password = normalizeAdminPassword(input.password);
 
-		if (!username || !displayName)
-			throw new Error("Display name, username, role, and password are required.");
+		validateAdminUserRole(input.role);
 
 		return runImmediateTransaction(() => {
 			const existing = database.prepare(`
@@ -1255,10 +1484,11 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 					credentials_updated_at,
 					mfa_secret,
 					mfa_enabled_at,
+					password_change_required_at,
 					updated_at,
 					disabled_at,
 					last_login_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`).run(
 				id,
 				username,
@@ -1270,6 +1500,7 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 				null,
 				null,
 				now,
+				now,
 				null,
 				null
 			);
@@ -1279,6 +1510,7 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 				actor: input.auditActor,
 				eventType: "admin_user_create",
 				metadata: {
+					passwordChangeRequiredAt: now,
 					role: input.role,
 					username
 				},
@@ -1294,6 +1526,7 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 				credentialsUpdatedAt: now,
 				displayName,
 				id,
+				passwordChangeRequiredAt: now,
 				role: input.role,
 				username
 			};
@@ -1515,13 +1748,19 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 				? current.password_hash
 				: hashPassword(normalizeAdminPassword(patch.password));
 			const shouldResetMfa = patch.mfaReset === true && Boolean(current.mfa_secret || current.mfa_enabled_at);
-			const shouldRotateCredentials = patch.password !== undefined || shouldResetMfa;
+			const disabledStateChanged = nextDisabledAt !== current.disabled_at;
+			const shouldRotateCredentials = patch.password !== undefined || shouldResetMfa || disabledStateChanged;
 			const nextCredentialsUpdatedAt = shouldRotateCredentials
 				? nextAdminCredentialTimestamp(current.credentials_updated_at || current.created_at)
 				: current.credentials_updated_at || current.created_at;
 			const nextUpdatedAt = shouldRotateCredentials ? nextCredentialsUpdatedAt : now;
 			const nextMfaSecret = patch.mfaReset === true ? null : current.mfa_secret;
 			const nextMfaEnabledAt = patch.mfaReset === true ? null : current.mfa_enabled_at;
+			const nextPasswordChangeRequiredAt = patch.password === undefined
+				? current.password_change_required_at
+				: patch.passwordChangeMode === "self-service"
+					? null
+					: nextCredentialsUpdatedAt;
 
 			if (patch.disabled && !current.disabled_at && current.role === "admin") {
 				const remainingAdmins = database.prepare(`
@@ -1536,20 +1775,30 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 
 			database.prepare(`
 			UPDATE admin_users
-			SET disabled_at = ?, password_hash = ?, mfa_secret = ?, mfa_enabled_at = ?, credentials_updated_at = ?, updated_at = ?
+			SET disabled_at = ?, password_hash = ?, mfa_secret = ?, mfa_enabled_at = ?, password_change_required_at = ?, credentials_updated_at = ?, updated_at = ?
 			WHERE id = ?
-		`).run(nextDisabledAt, nextPasswordHash, nextMfaSecret, nextMfaEnabledAt, nextCredentialsUpdatedAt, nextUpdatedAt, id);
+		`).run(
+				nextDisabledAt,
+				nextPasswordHash,
+				nextMfaSecret,
+				nextMfaEnabledAt,
+				nextPasswordChangeRequiredAt,
+				nextCredentialsUpdatedAt,
+				nextUpdatedAt,
+				id
+			);
 
-			if (patch.disabled !== undefined && nextDisabledAt !== current.disabled_at) {
+			if (disabledStateChanged) {
 				logActivity(
 					"review",
 					patch.disabled ? "Disabled admin user" : "Restored admin user",
-					`${current.display_name} ${patch.disabled ? "can no longer sign in" : "can sign in again"}.`
+					`${current.display_name} ${patch.disabled ? "can no longer sign in" : "can sign in again"}. Existing sessions for this account are no longer valid.`
 				);
 				appendAuditEvent({
 					actor: patch.auditActor,
 					eventType: patch.disabled ? "admin_user_disable" : "admin_user_restore",
 					metadata: {
+						credentialsUpdatedAt: nextCredentialsUpdatedAt,
 						disabledAt: nextDisabledAt,
 						username: current.username
 					},
@@ -1557,7 +1806,7 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 					targetId: current.id,
 					targetLabel: current.display_name,
 					targetType: "admin_user",
-					timestamp: now
+					timestamp: nextCredentialsUpdatedAt
 				});
 			}
 
@@ -1576,6 +1825,7 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 					eventType: isSelfService ? "admin_user_password_change" : "admin_user_password_reset",
 					metadata: {
 						credentialsUpdatedAt: nextCredentialsUpdatedAt,
+						passwordChangeRequiredAt: nextPasswordChangeRequiredAt,
 						selfService: isSelfService,
 						username: current.username
 					},
@@ -1701,10 +1951,6 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 		);
 	}
 
-	function recordAuditEvent(input: AuditEventInput) {
-		runImmediateTransaction(() => appendAuditEvent(input));
-	}
-
 	function listActivity(limit = 8) {
 		const rows = database.prepare(`
 			SELECT id, label, type, timestamp, summary
@@ -1774,55 +2020,69 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 	}
 
 	function createGuidePackage(input: CreateGuidePackageInput) {
-		const now = new Date().toISOString();
-		const status = input.status ?? "draft";
-		const createdAt = input.createdAt || now;
-		const draftedAt = input.draftedAt || now;
-		const updatedAt = input.updatedAt || now;
-		const reviewNotes = input.reviewNotes?.trim() || null;
-		const reviewRecommendation = input.reviewRecommendation || null;
-		const reviewer = input.reviewer?.trim() || null;
-		const existing = getGuidePackage(input.id);
+		return runImmediateTransaction(() => {
+			const now = new Date().toISOString();
+			const status = input.status ?? "draft";
+			const createdAt = input.createdAt || now;
+			const draftedAt = input.draftedAt || now;
+			const updatedAt = input.updatedAt || now;
+			const reviewNotes = input.reviewNotes?.trim() || null;
+			const reviewRecommendation = input.reviewRecommendation || null;
+			const reviewer = input.reviewer?.trim() || null;
+			const existing = getGuidePackage(input.id);
 
-		if (existing)
-			throw new Error("Guide package already exists.");
+			if (existing)
+				throw new Error("Guide package already exists.");
 
-		database.prepare(`
-			INSERT INTO admin_guide_packages (
-				id,
-				election_slug,
-				jurisdiction_slug,
+			validateGuidePackagePersistenceState({
+				coverageLimits: input.coverageLimits ?? [],
+				coverageNotes: input.coverageNotes ?? [],
+				draftedAt,
+				publishedAt: input.publishedAt || null,
+				reviewRecommendation,
+				reviewNotes,
+				reviewedAt: input.reviewedAt || null,
+				reviewer,
+				status
+			});
+
+			database.prepare(`
+				INSERT INTO admin_guide_packages (
+					id,
+					election_slug,
+					jurisdiction_slug,
+					status,
+					reviewer,
+					review_notes,
+					review_recommendation,
+					coverage_notes,
+					coverage_limits,
+					created_at,
+					drafted_at,
+					reviewed_at,
+					published_at,
+					updated_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`).run(
+				input.id,
+				input.electionSlug,
+				input.jurisdictionSlug,
 				status,
 				reviewer,
-				review_notes,
-				review_recommendation,
-				coverage_notes,
-				coverage_limits,
-				created_at,
-				drafted_at,
-				reviewed_at,
-				published_at,
-				updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`).run(
-			input.id,
-			input.electionSlug,
-			input.jurisdictionSlug,
-			status,
-			reviewer,
-			reviewNotes,
-			reviewRecommendation,
-			JSON.stringify(input.coverageNotes ?? []),
-			JSON.stringify(input.coverageLimits ?? []),
-			createdAt,
-			draftedAt,
-			input.reviewedAt || null,
-			input.publishedAt || null,
-			updatedAt
-		);
+				reviewNotes,
+				reviewRecommendation,
+				JSON.stringify(input.coverageNotes ?? []),
+				JSON.stringify(input.coverageLimits ?? []),
+				createdAt,
+				draftedAt,
+				input.reviewedAt || null,
+				input.publishedAt || null,
+				updatedAt
+			);
 
-		logActivity("review", "Guide package drafted", `${input.electionSlug} guide package entered the ${status.replaceAll("_", " ")} state.`);
-		return listGuidePackages();
+			logActivity("review", "Guide package drafted", `${input.electionSlug} guide package entered the ${status.replaceAll("_", " ")} state.`);
+			return listGuidePackages();
+		});
 	}
 
 	function getContentRecord(entityType: AdminEntityType, entitySlug: string) {
@@ -1921,329 +2181,352 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 	}
 
 	function updateContent(id: string, patch: ContentPatch) {
-		const current = getContentRow(id);
+		validateContentPatch(patch);
+		return runImmediateTransaction(() => {
+			const current = getContentRow(id);
 
-		if (!current)
-			throw new Error("Content record not found.");
+			if (!current)
+				throw new Error("Content record not found.");
 
-		const now = new Date().toISOString();
-		const nextPublished = patch.published ?? Boolean(current.published);
-		const nextStatus = patch.status
-			|| (nextPublished ? "published" : current.status === "published" ? "in-review" : current.status);
-		const nextPublishedAt = nextPublished ? current.published_at || now : null;
-		const publishApproval = resolvePublishApproval(current, patch, nextPublished, now);
-		const nextPublicSummary = patch.publicSummary === undefined
-			? current.public_summary || ""
-			: patch.publicSummary.trim();
+			const now = new Date().toISOString();
+			const nextPublished = patch.published ?? Boolean(current.published);
+			const nextStatus = patch.status
+				|| (nextPublished ? "published" : current.status === "published" ? "in-review" : current.status);
+			const nextPublishedAt = nextPublished ? current.published_at || now : null;
+			const publishApproval = resolvePublishApproval(current, patch, nextPublished, now);
+			const nextPublicSummary = patch.publicSummary === undefined
+				? current.public_summary || ""
+				: patch.publicSummary.trim();
 
-		if (!nextPublicSummary)
-			throw new Error("Public page summary is required.");
+			if (!nextPublicSummary)
+				throw new Error("Public page summary is required.");
 
-		const nextBallotSummary = patch.publicBallotSummary === undefined
-			? current.ballot_summary
-			: patch.publicBallotSummary?.trim() || null;
-		const nextSnapshot: AdminContentSnapshot = {
-			assignedTo: patch.assignedTo?.trim() || current.assigned_to,
-			blocker: patch.blocker === undefined ? current.blocker || undefined : patch.blocker?.trim() || undefined,
-			priority: patch.priority ?? current.priority,
-			publicBallotSummary: nextBallotSummary || undefined,
-			publicSummary: nextPublicSummary,
-			published: nextPublished,
-			publishedAt: nextPublishedAt || undefined,
-			publishApprovedAt: publishApproval.publishApprovedAt || undefined,
-			publishApprovedBy: publishApproval.publishApprovedBy || undefined,
-			publishApprovalNote: publishApproval.publishApprovalNote || undefined,
-			status: nextStatus,
-			updatedAt: now
-		};
-		const previousSnapshot = buildContentSnapshot(current);
-		const changedFields = changedContentFields(previousSnapshot, nextSnapshot);
+			const nextBallotSummary = patch.publicBallotSummary === undefined
+				? current.ballot_summary
+				: patch.publicBallotSummary?.trim() || null;
+			const nextSnapshot: AdminContentSnapshot = {
+				assignedTo: patch.assignedTo?.trim() || current.assigned_to,
+				blocker: patch.blocker === undefined ? current.blocker || undefined : patch.blocker?.trim() || undefined,
+				priority: patch.priority ?? current.priority,
+				publicBallotSummary: nextBallotSummary || undefined,
+				publicSummary: nextPublicSummary,
+				published: nextPublished,
+				publishedAt: nextPublishedAt || undefined,
+				publishApprovedAt: publishApproval.publishApprovedAt || undefined,
+				publishApprovedBy: publishApproval.publishApprovedBy || undefined,
+				publishApprovalNote: publishApproval.publishApprovalNote || undefined,
+				status: nextStatus,
+				updatedAt: now
+			};
 
-		if (!changedFields.length)
+			validateContentSnapshotForPersistence(nextSnapshot);
+			const previousSnapshot = buildContentSnapshot(current);
+			const changedFields = changedContentFields(previousSnapshot, nextSnapshot);
+
+			if (!changedFields.length)
+				return listContent();
+
+			database.prepare(`
+				UPDATE admin_content
+				SET status = ?,
+					priority = ?,
+					assigned_to = ?,
+					blocker = ?,
+					public_summary = ?,
+					ballot_summary = ?,
+					published = ?,
+					published_at = ?,
+					publish_approved_by = ?,
+					publish_approved_at = ?,
+					publish_approval_note = ?,
+					updated_at = ?
+				WHERE id = ?
+			`).run(
+				nextSnapshot.status,
+				nextSnapshot.priority,
+				nextSnapshot.assignedTo,
+				nextSnapshot.blocker || null,
+				nextSnapshot.publicSummary,
+				nextSnapshot.publicBallotSummary || null,
+				nextSnapshot.published ? 1 : 0,
+				nextSnapshot.publishedAt || null,
+				nextSnapshot.publishApprovedBy || null,
+				nextSnapshot.publishApprovedAt || null,
+				nextSnapshot.publishApprovalNote || null,
+				now,
+				id
+			);
+
+			writeContentHistory(
+				id,
+				now,
+				changedFields,
+				previousSnapshot,
+				nextSnapshot,
+				describeContentHistoryChange(current.title, changedFields)
+			);
+
+			logActivity(
+				nextPublished ? "publish" : "review",
+				`${current.title} updated`,
+				nextPublished
+					? `${current.title} is marked published and approved by ${nextSnapshot.publishApprovedBy}.`
+					: `${current.title} moved to ${nextStatus}.`
+			);
+
+			if (
+				changedFields.includes("published")
+				|| changedFields.includes("publishApprovedAt")
+				|| changedFields.includes("publishApprovedBy")
+				|| changedFields.includes("publishApprovalNote")
+			) {
+				appendAuditEvent({
+					actor: patch.auditActor,
+					eventType: nextPublished ? "content_publish" : "content_unpublish",
+					metadata: {
+						changedFields,
+						entitySlug: current.entity_slug,
+						entityType: current.entity_type,
+						publishApprovedAt: nextSnapshot.publishApprovedAt ?? null,
+						publishApprovedBy: nextSnapshot.publishApprovedBy ?? null
+					},
+					summary: nextPublished
+						? `${current.title} was published with reviewer approval.`
+						: `${current.title} was unpublished and approval metadata was cleared.`,
+					targetId: current.id,
+					targetLabel: current.title,
+					targetType: "admin_content",
+					timestamp: now
+				});
+			}
+
 			return listContent();
+		});
+	}
 
-		database.prepare(`
-			UPDATE admin_content
-			SET status = ?,
-				priority = ?,
-				assigned_to = ?,
-				blocker = ?,
-				public_summary = ?,
-				ballot_summary = ?,
-				published = ?,
-				published_at = ?,
-				publish_approved_by = ?,
-				publish_approved_at = ?,
-				publish_approval_note = ?,
-				updated_at = ?
-			WHERE id = ?
-		`).run(
-			nextSnapshot.status,
-			nextSnapshot.priority,
-			nextSnapshot.assignedTo,
-			nextSnapshot.blocker || null,
-			nextSnapshot.publicSummary,
-			nextSnapshot.publicBallotSummary || null,
-			nextSnapshot.published ? 1 : 0,
-			nextSnapshot.publishedAt || null,
-			nextSnapshot.publishApprovedBy || null,
-			nextSnapshot.publishApprovedAt || null,
-			nextSnapshot.publishApprovalNote || null,
-			now,
-			id
-		);
+	function rollbackContent(id: string, historyId: string, auditActor?: AdminAuditActor) {
+		return runImmediateTransaction(() => {
+			const current = getContentRow(id);
 
-		writeContentHistory(
-			id,
-			now,
-			changedFields,
-			previousSnapshot,
-			nextSnapshot,
-			describeContentHistoryChange(current.title, changedFields)
-		);
+			if (!current)
+				throw new Error("Content record not found.");
 
-		logActivity(
-			nextPublished ? "publish" : "review",
-			`${current.title} updated`,
-			nextPublished
-				? `${current.title} is marked published and approved by ${nextSnapshot.publishApprovedBy}.`
-				: `${current.title} moved to ${nextStatus}.`
-		);
+			const historyRow = database.prepare(`
+				SELECT id, content_id, changed_at, changed_fields, previous_snapshot, next_snapshot, summary
+				FROM admin_content_history
+				WHERE id = ? AND content_id = ?
+			`).get(historyId, id) as ContentHistoryRow | undefined;
 
-		if (
-			changedFields.includes("published")
-			|| changedFields.includes("publishApprovedAt")
-			|| changedFields.includes("publishApprovedBy")
-			|| changedFields.includes("publishApprovalNote")
-		) {
-			recordAuditEvent({
-				actor: patch.auditActor,
-				eventType: nextPublished ? "content_publish" : "content_unpublish",
+			if (!historyRow)
+				throw new Error("Content history record not found.");
+
+			const now = new Date().toISOString();
+			const previousSnapshot = buildContentSnapshot(current);
+			const rollbackValues = snapshotToContentUpdateValues(parseContentSnapshot(historyRow.previous_snapshot));
+
+			if (!rollbackValues.publicSummary)
+				throw new Error("Rollback target has no public page summary.");
+
+			const nextSnapshot: AdminContentSnapshot = {
+				assignedTo: rollbackValues.assignedTo,
+				blocker: rollbackValues.blocker || undefined,
+				priority: rollbackValues.priority,
+				publicBallotSummary: rollbackValues.publicBallotSummary || undefined,
+				publicSummary: rollbackValues.publicSummary,
+				published: rollbackValues.published,
+				publishedAt: rollbackValues.publishedAt || undefined,
+				publishApprovedAt: rollbackValues.publishApprovedAt || undefined,
+				publishApprovedBy: rollbackValues.publishApprovedBy || undefined,
+				publishApprovalNote: rollbackValues.publishApprovalNote || undefined,
+				status: rollbackValues.status,
+				updatedAt: now
+			};
+
+			validateContentSnapshotForPersistence(nextSnapshot);
+			const changedFields = changedContentFields(previousSnapshot, nextSnapshot);
+
+			if (!changedFields.length)
+				return listContent();
+
+			database.prepare(`
+				UPDATE admin_content
+				SET status = ?,
+					priority = ?,
+					assigned_to = ?,
+					blocker = ?,
+					public_summary = ?,
+					ballot_summary = ?,
+					published = ?,
+					published_at = ?,
+					publish_approved_by = ?,
+					publish_approved_at = ?,
+					publish_approval_note = ?,
+					updated_at = ?
+				WHERE id = ?
+			`).run(
+				nextSnapshot.status,
+				nextSnapshot.priority,
+				nextSnapshot.assignedTo,
+				nextSnapshot.blocker || null,
+				nextSnapshot.publicSummary,
+				nextSnapshot.publicBallotSummary || null,
+				nextSnapshot.published ? 1 : 0,
+				nextSnapshot.publishedAt || null,
+				nextSnapshot.publishApprovedBy || null,
+				nextSnapshot.publishApprovedAt || null,
+				nextSnapshot.publishApprovalNote || null,
+				now,
+				id
+			);
+
+			writeContentHistory(
+				id,
+				now,
+				changedFields,
+				previousSnapshot,
+				nextSnapshot,
+				`Rolled back ${current.title} to the version from ${historyRow.changed_at}.`
+			);
+			logActivity("review", `${current.title} rolled back`, `Restored public content fields from the ${historyRow.changed_at} revision.`);
+			appendAuditEvent({
+				actor: auditActor,
+				eventType: "content_rollback",
 				metadata: {
 					changedFields,
-					entitySlug: current.entity_slug,
-					entityType: current.entity_type,
-					publishApprovedAt: nextSnapshot.publishApprovedAt ?? null,
-					publishApprovedBy: nextSnapshot.publishApprovedBy ?? null
+					restoredFromHistoryId: historyRow.id,
+					restoredFromTimestamp: historyRow.changed_at
 				},
-				summary: nextPublished
-					? `${current.title} was published with reviewer approval.`
-					: `${current.title} was unpublished and approval metadata was cleared.`,
+				summary: `${current.title} was rolled back to the ${historyRow.changed_at} revision.`,
 				targetId: current.id,
 				targetLabel: current.title,
 				targetType: "admin_content",
 				timestamp: now
 			});
-		}
 
-		return listContent();
-	}
-
-	function rollbackContent(id: string, historyId: string, auditActor?: AdminAuditActor) {
-		const current = getContentRow(id);
-
-		if (!current)
-			throw new Error("Content record not found.");
-
-		const historyRow = database.prepare(`
-			SELECT id, content_id, changed_at, changed_fields, previous_snapshot, next_snapshot, summary
-			FROM admin_content_history
-			WHERE id = ? AND content_id = ?
-		`).get(historyId, id) as ContentHistoryRow | undefined;
-
-		if (!historyRow)
-			throw new Error("Content history record not found.");
-
-		const now = new Date().toISOString();
-		const previousSnapshot = buildContentSnapshot(current);
-		const rollbackValues = snapshotToContentUpdateValues(parseContentSnapshot(historyRow.previous_snapshot));
-
-		if (!rollbackValues.publicSummary)
-			throw new Error("Rollback target has no public page summary.");
-
-		const nextSnapshot: AdminContentSnapshot = {
-			assignedTo: rollbackValues.assignedTo,
-			blocker: rollbackValues.blocker || undefined,
-			priority: rollbackValues.priority,
-			publicBallotSummary: rollbackValues.publicBallotSummary || undefined,
-			publicSummary: rollbackValues.publicSummary,
-			published: rollbackValues.published,
-			publishedAt: rollbackValues.publishedAt || undefined,
-			publishApprovedAt: rollbackValues.publishApprovedAt || undefined,
-			publishApprovedBy: rollbackValues.publishApprovedBy || undefined,
-			publishApprovalNote: rollbackValues.publishApprovalNote || undefined,
-			status: rollbackValues.status,
-			updatedAt: now
-		};
-		const changedFields = changedContentFields(previousSnapshot, nextSnapshot);
-
-		if (!changedFields.length)
 			return listContent();
-
-		database.prepare(`
-			UPDATE admin_content
-			SET status = ?,
-				priority = ?,
-				assigned_to = ?,
-				blocker = ?,
-				public_summary = ?,
-				ballot_summary = ?,
-				published = ?,
-				published_at = ?,
-				publish_approved_by = ?,
-				publish_approved_at = ?,
-				publish_approval_note = ?,
-				updated_at = ?
-			WHERE id = ?
-		`).run(
-			nextSnapshot.status,
-			nextSnapshot.priority,
-			nextSnapshot.assignedTo,
-			nextSnapshot.blocker || null,
-			nextSnapshot.publicSummary,
-			nextSnapshot.publicBallotSummary || null,
-			nextSnapshot.published ? 1 : 0,
-			nextSnapshot.publishedAt || null,
-			nextSnapshot.publishApprovedBy || null,
-			nextSnapshot.publishApprovedAt || null,
-			nextSnapshot.publishApprovalNote || null,
-			now,
-			id
-		);
-
-		writeContentHistory(
-			id,
-			now,
-			changedFields,
-			previousSnapshot,
-			nextSnapshot,
-			`Rolled back ${current.title} to the version from ${historyRow.changed_at}.`
-		);
-		logActivity("review", `${current.title} rolled back`, `Restored public content fields from the ${historyRow.changed_at} revision.`);
-		recordAuditEvent({
-			actor: auditActor,
-			eventType: "content_rollback",
-			metadata: {
-				changedFields,
-				restoredFromHistoryId: historyRow.id,
-				restoredFromTimestamp: historyRow.changed_at
-			},
-			summary: `${current.title} was rolled back to the ${historyRow.changed_at} revision.`,
-			targetId: current.id,
-			targetLabel: current.title,
-			targetType: "admin_content",
-			timestamp: now
 		});
-
-		return listContent();
 	}
 
 	function updateGuidePackage(id: string, patch: GuidePackagePatch) {
-		const current = database.prepare(`
-			SELECT id, election_slug, jurisdiction_slug, status, reviewer, review_notes, review_recommendation, coverage_notes, coverage_limits, created_at, drafted_at, reviewed_at, published_at, updated_at
-			FROM admin_guide_packages
-			WHERE id = ?
-		`).get(id) as GuidePackageRow | undefined;
+		return runImmediateTransaction(() => {
+			const current = database.prepare(`
+				SELECT id, election_slug, jurisdiction_slug, status, reviewer, review_notes, review_recommendation, coverage_notes, coverage_limits, created_at, drafted_at, reviewed_at, published_at, updated_at
+				FROM admin_guide_packages
+				WHERE id = ?
+			`).get(id) as GuidePackageRow | undefined;
 
-		if (!current)
-			throw new Error("Guide package not found.");
+			if (!current)
+				throw new Error("Guide package not found.");
 
-		const now = new Date().toISOString();
-		const nextStatus = patch.status ?? current.status;
-		const nextReviewer = patch.reviewer === undefined
-			? current.reviewer
-			: patch.reviewer?.trim() || null;
-		const nextReviewRecommendation = patch.reviewRecommendation === undefined
-			? current.review_recommendation
-			: patch.reviewRecommendation || null;
-		const nextReviewNotes = patch.reviewNotes === undefined
-			? current.review_notes
-			: patch.reviewNotes?.trim() || null;
-		const nextCoverageNotes = patch.coverageNotes === undefined
-			? parseStoredStringArray(current.coverage_notes)
-			: patch.coverageNotes ?? [];
-		const nextCoverageLimits = patch.coverageLimits === undefined
-			? parseStoredStringArray(current.coverage_limits)
-			: patch.coverageLimits ?? [];
-		const nextDraftedAt = patch.draftedAt || current.drafted_at;
-		const nextReviewedAt = patch.reviewedAt === undefined
-			? current.reviewed_at
-			: patch.reviewedAt;
-		const nextPublishedAt = patch.publishedAt === undefined
-			? current.published_at
-			: patch.publishedAt;
+			const now = new Date().toISOString();
+			const nextStatus = patch.status ?? current.status;
+			const nextReviewer = patch.reviewer === undefined
+				? current.reviewer
+				: patch.reviewer?.trim() || null;
+			const nextReviewRecommendation = patch.reviewRecommendation === undefined
+				? current.review_recommendation
+				: patch.reviewRecommendation || null;
+			const nextReviewNotes = patch.reviewNotes === undefined
+				? current.review_notes
+				: patch.reviewNotes?.trim() || null;
+			const nextCoverageNotes = patch.coverageNotes === undefined
+				? parseStoredStringArray(current.coverage_notes)
+				: patch.coverageNotes ?? [];
+			const nextCoverageLimits = patch.coverageLimits === undefined
+				? parseStoredStringArray(current.coverage_limits)
+				: patch.coverageLimits ?? [];
+			const nextDraftedAt = patch.draftedAt || current.drafted_at;
+			const nextReviewedAt = patch.reviewedAt === undefined
+				? current.reviewed_at
+				: patch.reviewedAt;
+			const nextPublishedAt = patch.publishedAt === undefined
+				? current.published_at
+				: patch.publishedAt;
 
-		database.prepare(`
-			UPDATE admin_guide_packages
-			SET status = ?,
-				reviewer = ?,
-				review_notes = ?,
-				review_recommendation = ?,
-				coverage_notes = ?,
-				coverage_limits = ?,
-				drafted_at = ?,
-				reviewed_at = ?,
-				published_at = ?,
-				updated_at = ?
-			WHERE id = ?
-		`).run(
-			nextStatus,
-			nextReviewer,
-			nextReviewNotes,
-			nextReviewRecommendation,
-			JSON.stringify(nextCoverageNotes),
-			JSON.stringify(nextCoverageLimits),
-			nextDraftedAt,
-			nextReviewedAt || null,
-			nextPublishedAt || null,
-			now,
-			id
-		);
-
-		logActivity(
-			nextStatus === "published" ? "publish" : "review",
-			`Guide package ${current.election_slug} updated`,
-			`Guide package moved to ${nextStatus.replaceAll("_", " ")}.`
-		);
-
-		if (current.status !== "published" && nextStatus === "published") {
-			recordAuditEvent({
-				actor: patch.auditActor,
-				eventType: "guide_package_publish",
-				metadata: {
-					electionSlug: current.election_slug,
-					jurisdictionSlug: current.jurisdiction_slug,
-					publishedAt: nextPublishedAt,
-					reviewRecommendation: nextReviewRecommendation,
-					reviewer: nextReviewer
-				},
-				summary: `${current.election_slug} guide package was published.`,
-				targetId: current.id,
-				targetLabel: current.election_slug,
-				targetType: "guide_package",
-				timestamp: now
+			validateGuidePackagePersistenceState({
+				coverageLimits: nextCoverageLimits,
+				coverageNotes: nextCoverageNotes,
+				draftedAt: nextDraftedAt,
+				publishedAt: nextPublishedAt,
+				reviewRecommendation: nextReviewRecommendation,
+				reviewNotes: nextReviewNotes,
+				reviewedAt: nextReviewedAt,
+				reviewer: nextReviewer,
+				status: nextStatus
 			});
-		}
-		else if (current.status === "published" && nextStatus !== "published") {
-			recordAuditEvent({
-				actor: patch.auditActor,
-				eventType: "guide_package_unpublish",
-				metadata: {
-					electionSlug: current.election_slug,
-					jurisdictionSlug: current.jurisdiction_slug,
-					nextStatus,
-					reviewRecommendation: nextReviewRecommendation,
-					reviewer: nextReviewer
-				},
-				summary: `${current.election_slug} guide package was unpublished.`,
-				targetId: current.id,
-				targetLabel: current.election_slug,
-				targetType: "guide_package",
-				timestamp: now
-			});
-		}
 
-		return listGuidePackages();
+			database.prepare(`
+				UPDATE admin_guide_packages
+				SET status = ?,
+					reviewer = ?,
+					review_notes = ?,
+					review_recommendation = ?,
+					coverage_notes = ?,
+					coverage_limits = ?,
+					drafted_at = ?,
+					reviewed_at = ?,
+					published_at = ?,
+					updated_at = ?
+				WHERE id = ?
+			`).run(
+				nextStatus,
+				nextReviewer,
+				nextReviewNotes,
+				nextReviewRecommendation,
+				JSON.stringify(nextCoverageNotes),
+				JSON.stringify(nextCoverageLimits),
+				nextDraftedAt,
+				nextReviewedAt || null,
+				nextPublishedAt || null,
+				now,
+				id
+			);
+
+			logActivity(
+				nextStatus === "published" ? "publish" : "review",
+				`Guide package ${current.election_slug} updated`,
+				`Guide package moved to ${nextStatus.replaceAll("_", " ")}.`
+			);
+
+			if (current.status !== "published" && nextStatus === "published") {
+				appendAuditEvent({
+					actor: patch.auditActor,
+					eventType: "guide_package_publish",
+					metadata: {
+						electionSlug: current.election_slug,
+						jurisdictionSlug: current.jurisdiction_slug,
+						publishedAt: nextPublishedAt,
+						reviewRecommendation: nextReviewRecommendation,
+						reviewer: nextReviewer
+					},
+					summary: `${current.election_slug} guide package was published.`,
+					targetId: current.id,
+					targetLabel: current.election_slug,
+					targetType: "guide_package",
+					timestamp: now
+				});
+			}
+			else if (current.status === "published" && nextStatus !== "published") {
+				appendAuditEvent({
+					actor: patch.auditActor,
+					eventType: "guide_package_unpublish",
+					metadata: {
+						electionSlug: current.election_slug,
+						jurisdictionSlug: current.jurisdiction_slug,
+						nextStatus,
+						reviewRecommendation: nextReviewRecommendation,
+						reviewer: nextReviewer
+					},
+					summary: `${current.election_slug} guide package was unpublished.`,
+					targetId: current.id,
+					targetLabel: current.election_slug,
+					targetType: "guide_package",
+					timestamp: now
+				});
+			}
+
+			return listGuidePackages();
+		});
 	}
 
 	function listReview(): AdminReviewResponse {
@@ -2329,66 +2612,69 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 
 	function createCorrectionSubmission(input: CorrectionSubmissionInput) {
 		const submission = normalizeCorrectionSubmission(input);
-		const { email, message, subject } = submission;
+		return runImmediateTransaction(() => {
+			const { email, message, subject } = submission;
+			const now = new Date().toISOString();
+			const id = `correction-${randomUUID()}`;
+			const reportedBy = submission.name ? `${submission.name} <${email}>` : email;
+			const summary = submission.sourceLinks
+				? `${message}\n\nSupporting links:\n${submission.sourceLinks}`
+				: message;
+			const contentId = resolveContentIdForPageUrl(submission.pageUrl);
 
-		const now = new Date().toISOString();
-		const id = `correction-${randomUUID()}`;
-		const reportedBy = submission.name ? `${submission.name} <${email}>` : email;
-		const summary = submission.sourceLinks
-			? `${message}\n\nSupporting links:\n${submission.sourceLinks}`
-			: message;
-		const contentId = resolveContentIdForPageUrl(submission.pageUrl);
-
-		database.prepare(`
-			INSERT INTO admin_corrections (
+			database.prepare(`
+				INSERT INTO admin_corrections (
+					id,
+					submission_type,
+					subject,
+					entity_type,
+					entity_label,
+					status,
+					priority,
+					submitted_at,
+					reported_by,
+					summary,
+					next_step,
+					source_count,
+					page_url,
+					content_id
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`).run(
 				id,
-				submission_type,
+				submission.submissionType,
 				subject,
-				entity_type,
-				entity_label,
-				status,
-				priority,
-				submitted_at,
-				reported_by,
+				"policy",
+				submission.pageUrl || "General site feedback",
+				"new",
+				submission.submissionType === "correction" ? "high" : "medium",
+				now,
+				reportedBy,
 				summary,
-				next_step,
-				source_count,
-				page_url,
-				content_id
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`).run(
-			id,
-			submission.submissionType,
-			subject,
-			"policy",
-			submission.pageUrl || "General site feedback",
-			"new",
-			submission.submissionType === "correction" ? "high" : "medium",
-			now,
-			reportedBy,
-			summary,
-			submission.submissionType === "correction"
-				? "Verify the cited claim, source trail, and page framing."
-				: "Triage the feedback and determine whether it belongs in product, content, or operations review.",
-			submission.sourceLinks?.split("\n").length ?? 0,
-			submission.pageUrl || null,
-			contentId
-		);
+				submission.submissionType === "correction"
+					? "Verify the cited claim, source trail, and page framing."
+					: "Triage the feedback and determine whether it belongs in product, content, or operations review.",
+				submission.sourceLinks?.split("\n").length ?? 0,
+				submission.pageUrl || null,
+				contentId
+			);
 
-		logActivity(
-			"correction",
-			submission.submissionType === "correction" ? "Received correction submission" : "Received public feedback",
-			`${subject} was submitted through the public contact form.`
-		);
+			logActivity(
+				"correction",
+				submission.submissionType === "correction" ? "Received correction submission" : "Received public feedback",
+				`${subject} was submitted through the public contact form.`
+			);
 
-		return {
-			ok: true,
-			submittedAt: now
-		} as const;
+			return {
+				ok: true,
+				submittedAt: now
+			} as const;
+		});
 	}
 
 	function updateCorrection(id: string, patch: CorrectionPatch) {
-		const current = database.prepare(`
+		validateCorrectionPatch(patch);
+		return runImmediateTransaction(() => {
+			const current = database.prepare(`
 			SELECT
 				c.id,
 				c.submission_type,
@@ -2410,37 +2696,72 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 			WHERE c.id = ?
 		`).get(id) as CorrectionRow | undefined;
 
-		if (!current)
-			throw new Error("Correction record not found.");
+			if (!current)
+				throw new Error("Correction record not found.");
 
-		const contentId = patch.contentId === undefined
-			? current.content_id
-			: resolvePatchContentId(patch.contentId);
+			const contentId = patch.contentId === undefined
+				? current.content_id
+				: resolvePatchContentId(patch.contentId);
+			const nextStatus = patch.status ?? current.status;
+			const nextPriority = patch.priority ?? current.priority;
+			const nextStep = patch.nextStep?.trim() || current.next_step;
+			const now = new Date().toISOString();
 
-		database.prepare(`
+			database.prepare(`
 			UPDATE admin_corrections
 			SET status = ?, priority = ?, next_step = ?, content_id = ?
 			WHERE id = ?
-		`).run(
-			patch.status ?? current.status,
-			patch.priority ?? current.priority,
-			patch.nextStep?.trim() || current.next_step,
-			contentId,
-			id
-		);
+			`).run(
+				nextStatus,
+				nextPriority,
+				nextStep,
+				contentId,
+				id
+			);
 
-		const linkageSummary = contentId === current.content_id
-			? ""
-			: contentId
-				? " Linked to a content record."
-				: " Removed linked content record.";
-		logActivity(
-			"correction",
-			`${current.subject} updated`,
-			`Correction item moved to ${patch.status ?? current.status}.${linkageSummary}`
-		);
+			const linkageSummary = contentId === current.content_id
+				? ""
+				: contentId
+					? " Linked to a content record."
+					: " Removed linked content record.";
+			logActivity(
+				"correction",
+				`${current.subject} updated`,
+				`Correction item moved to ${nextStatus}.${linkageSummary}`
+			);
 
-		return listCorrections();
+			if (current.status !== "new" || nextStatus !== "new") {
+				const eventType = current.status === "new" && nextStatus !== "new"
+					? "correction_publish"
+					: current.status !== "new" && nextStatus === "new"
+						? "correction_unpublish"
+						: "correction_public_update";
+
+				appendAuditEvent({
+					actor: patch.auditActor,
+					eventType,
+					metadata: {
+						contentId,
+						nextPriority,
+						nextStatus,
+						previousContentId: current.content_id,
+						previousPriority: current.priority,
+						previousStatus: current.status
+					},
+					summary: eventType === "correction_publish"
+						? `${current.subject} was promoted from private intake to the public corrections log.`
+						: eventType === "correction_unpublish"
+							? `${current.subject} was removed from the public corrections log and returned to private intake.`
+							: `${current.subject} public correction record was updated.`,
+					targetId: current.id,
+					targetLabel: current.subject,
+					targetType: "correction",
+					timestamp: now
+				});
+			}
+
+			return listCorrections();
+		});
 	}
 
 	function listSourceMonitor(): AdminSourceMonitorResponse {
@@ -2456,33 +2777,57 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 	}
 
 	function updateSource(id: string, patch: SourcePatch) {
-		const current = database.prepare(`
+		validateSourcePatch(patch);
+		return runImmediateTransaction(() => {
+			const current = database.prepare(`
 			SELECT id, label, authority, health, last_checked_at, next_check_at, owner, note
 			FROM admin_source_monitors
 			WHERE id = ?
 		`).get(id) as SourceRow | undefined;
 
-		if (!current)
-			throw new Error("Source monitor record not found.");
+			if (!current)
+				throw new Error("Source monitor record not found.");
 
-		const now = new Date().toISOString();
+			const now = new Date().toISOString();
+			const nextHealth = patch.health ?? current.health;
+			const nextCheckAt = patch.nextCheckAt?.trim() || current.next_check_at;
+			const nextOwner = patch.owner?.trim() || current.owner;
+			const nextNote = patch.note?.trim() || current.note;
 
-		database.prepare(`
+			database.prepare(`
 			UPDATE admin_source_monitors
 			SET health = ?, last_checked_at = ?, next_check_at = ?, owner = ?, note = ?
 			WHERE id = ?
-		`).run(
-			patch.health ?? current.health,
-			now,
-			patch.nextCheckAt?.trim() || current.next_check_at,
-			patch.owner?.trim() || current.owner,
-			patch.note?.trim() || current.note,
-			id
-		);
+			`).run(
+				nextHealth,
+				now,
+				nextCheckAt,
+				nextOwner,
+				nextNote,
+				id
+			);
 
-		logActivity("source-check", `${current.label} updated`, `Source monitor status is now ${patch.health ?? current.health}.`);
+			logActivity("source-check", `${current.label} updated`, `Source monitor status is now ${nextHealth}.`);
+			appendAuditEvent({
+				actor: patch.auditActor,
+				eventType: "source_monitor_update",
+				metadata: {
+					health: nextHealth,
+					nextCheckAt,
+					owner: nextOwner,
+					previousHealth: current.health,
+					previousNextCheckAt: current.next_check_at,
+					previousOwner: current.owner
+				},
+				summary: `${current.label} source monitor was checked and updated.`,
+				targetId: current.id,
+				targetLabel: current.label,
+				targetType: "source_monitor",
+				timestamp: now
+			});
 
-		return listSourceMonitor();
+			return listSourceMonitor();
+		});
 	}
 
 	function getOverview(): AdminOverviewResponse {

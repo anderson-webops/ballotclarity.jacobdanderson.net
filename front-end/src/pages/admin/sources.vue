@@ -7,7 +7,9 @@ definePageMeta({
 	middleware: "admin"
 });
 
+const { data: session } = await useAdminSession("admin-sources-session");
 const { data, refresh } = await useAdminSourceMonitor();
+const canManageSources = computed(() => session.value?.role === "admin" && Boolean(session.value.mfaEnabledAt));
 const healthOptions: AdminSourceHealth[] = ["healthy", "review-soon", "stale", "incident"];
 const savingId = ref<string | null>(null);
 const feedbackMessage = ref("");
@@ -64,6 +66,13 @@ usePageSeo({
 			</p>
 		</header>
 
+		<InfoCallout v-if="session?.role !== 'admin'" title="Admin-only changes" tone="warning">
+			You can review source health, but only admin users can change operational source status.
+		</InfoCallout>
+		<InfoCallout v-else-if="!session.mfaEnabledAt" title="MFA required" tone="warning">
+			Enable multi-factor authentication on your Account page before changing source-health records.
+		</InfoCallout>
+
 		<p
 			v-if="feedbackMessage"
 			class="text-sm px-4 py-3 rounded-2xl"
@@ -112,6 +121,7 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Health</span>
 							<select
 								v-model="item.health"
+								:disabled="!canManageSources"
 								class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							>
 								<option v-for="health in healthOptions" :key="health" :value="health">
@@ -123,6 +133,7 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Owner</span>
 							<input
 								v-model="item.owner"
+								:disabled="!canManageSources"
 								type="text"
 								class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							>
@@ -131,6 +142,7 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Next check (ISO timestamp)</span>
 							<input
 								v-model="item.nextCheckAt"
+								:disabled="!canManageSources"
 								type="text"
 								class="text-sm text-app-ink mt-2 px-4 border border-app-line rounded-2xl bg-white h-13 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							>
@@ -139,11 +151,12 @@ usePageSeo({
 							<span class="text-sm text-app-ink font-semibold dark:text-app-text-dark">Operational note</span>
 							<textarea
 								v-model="item.note"
+								:disabled="!canManageSources"
 								rows="4"
 								class="text-sm text-app-ink mt-2 px-4 py-3 border border-app-line rounded-2xl bg-white min-h-28 w-full shadow-sm dark:text-app-text-dark dark:border-app-line-dark dark:bg-app-panel-dark focus-ring"
 							/>
 						</label>
-						<button type="submit" class="btn-primary w-full" :disabled="savingId === item.id">
+						<button type="submit" class="btn-primary w-full" :disabled="!canManageSources || savingId === item.id">
 							{{ savingId === item.id ? "Saving..." : "Save source status" }}
 						</button>
 					</form>

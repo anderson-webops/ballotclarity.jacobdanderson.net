@@ -3,13 +3,15 @@ import test from "node:test";
 import { createOpenStatesClient } from "../src/openstates.js";
 
 test("createOpenStatesClient caps jurisdiction page size at the Open States maximum", async () => {
+	let capturedSignal: AbortSignal | null | undefined;
 	const requestedUrls: URL[] = [];
 	const client = createOpenStatesClient({
 		apiKey: "test-openstates-key",
-		fetchImpl: (async (resource) => {
+		fetchImpl: (async (resource, init) => {
 			const requestUrl = resource as URL;
 
 			requestedUrls.push(requestUrl);
+			capturedSignal = init?.signal;
 
 			return new Response(JSON.stringify({
 				pagination: {
@@ -33,6 +35,7 @@ test("createOpenStatesClient caps jurisdiction page size at the Open States maxi
 
 	assert.equal(requestedUrls.length, 1);
 	assert.equal(requestedUrls[0].searchParams.get("per_page"), "50");
+	assert.ok(capturedSignal instanceof AbortSignal);
 });
 
 test("createOpenStatesClient includes the provider response body in lookup errors", async () => {

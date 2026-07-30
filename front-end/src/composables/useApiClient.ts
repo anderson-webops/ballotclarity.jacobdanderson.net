@@ -5,5 +5,6 @@ export function useApiClient() {
 		baseURL: config.public.apiBase,
 		credentials: "include",
 		headers: import.meta.server ? useRequestHeaders(["cookie"]) : undefined,
+		timeout: config.public.apiFetchTimeoutMs
 	});
 }

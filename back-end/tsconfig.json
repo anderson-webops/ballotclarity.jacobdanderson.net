@@ -2,6 +2,7 @@
 	"extends": "../tsconfig.base.json",
 	"compilerOptions": {
 		"incremental": true,
+		"tsBuildInfoFile": "./dist/.tsbuildinfo",
 		"module": "nodenext",
 		"moduleResolution": "nodenext",
 		"typeRoots": ["./node_modules/@types"],

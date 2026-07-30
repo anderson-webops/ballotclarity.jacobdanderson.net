@@ -170,12 +170,12 @@ function providerStatusTone(status: "active" | "needs_endpoint" | "needs_key" | 
 									{{ provider.configured ? "Ballot Clarity can use this provider when its data is relevant." : "Ballot Clarity is not currently using this provider for live ballot data." }}
 								</p>
 								<div class="mt-4 flex flex-wrap gap-3">
-									<a :href="provider.setupUrl" target="_blank" rel="noopener noreferrer" class="btn-secondary">
+									<SafeExternalLink :href="provider.setupUrl" class="btn-secondary">
 										Provider site
-									</a>
-									<a v-if="provider.docsUrl" :href="provider.docsUrl" target="_blank" rel="noopener noreferrer" class="btn-secondary">
+									</SafeExternalLink>
+									<SafeExternalLink v-if="provider.docsUrl" :href="provider.docsUrl" class="btn-secondary">
 										Technical docs
-									</a>
+									</SafeExternalLink>
 								</div>
 							</div>
 						</details>
@@ -277,16 +277,14 @@ function providerStatusTone(status: "active" | "needs_endpoint" | "needs_key" | 
 									</ul>
 								</div>
 								<div v-if="option.links?.length" class="mt-5 flex flex-wrap gap-3">
-									<a
+									<SafeExternalLink
 										v-for="link in option.links"
 										:key="link.url"
 										:href="link.url"
-										target="_blank"
-										rel="noopener noreferrer"
 										class="btn-secondary"
 									>
 										{{ link.label }}
-									</a>
+									</SafeExternalLink>
 								</div>
 							</details>
 						</div>

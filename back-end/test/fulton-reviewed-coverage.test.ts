@@ -127,6 +127,20 @@ test("production-approved validation rejects placeholder and internal public URL
 	assert.ok(validation.errors.some(error => /placeholder or internal public URLs/i.test(error)));
 });
 
+test("coverage publication rejects executable or otherwise unsafe public URL fields", () => {
+	const snapshot = buildFultonOfficialLogisticsOnlySnapshot();
+	assert.ok(snapshot.jurisdiction);
+	assert.ok(snapshot.jurisdiction.officialResources[0]);
+	snapshot.jurisdiction.officialResources[0].url = "javascript:alert(1)";
+
+	const validation = validateCoverageSnapshotForPublication(snapshot, approvedMetadata());
+
+	assert.equal(validation.ok, false);
+	assert.equal(validation.unsafePublicHrefMatches.length, 1);
+	assert.equal(validation.unsafePublicHrefMatches[0]?.path, "$.jurisdiction.officialResources[0].url");
+	assert.ok(validation.errors.some(error => /unsafe public URL values/i.test(error)));
+});
+
 test("production-approved validation rejects mixed or staged guide content", () => {
 	const validation = validateCoverageSnapshotForPublication(
 		buildSeedCoverageSnapshot(),
