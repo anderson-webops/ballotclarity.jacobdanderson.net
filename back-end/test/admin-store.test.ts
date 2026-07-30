@@ -79,3 +79,102 @@ test("SQLite admin storage persists MFA seeds only as account-bound ciphertext",
 		rmSync(root, { force: true, recursive: true });
 	}
 });
+
+test("SQLite account mutations roll back when their audit event cannot be recorded", async () => {
+	const root = mkdtempSync(join(tmpdir(), "ballot-clarity-admin-transaction-"));
+	const dbPath = join(root, "admin.sqlite");
+	const encryptionKey = "test-admin-mfa-encryption-key-that-is-long-enough";
+	const password = "correct-horse-battery-staple";
+
+	try {
+		const repository = createSqliteAdminRepository({
+			bootstrapDisplayName: "Operations Admin",
+			bootstrapPassword: password,
+			bootstrapUsername: "ops-admin",
+			dbPath,
+			mfaEncryptionKey: encryptionKey,
+		});
+		const editor = await repository.createUser({
+			displayName: "Editorial Reviewer",
+			password: "editorial-review-password",
+			role: "editor",
+			username: "reviewer",
+		});
+		const inspector = new DatabaseSync(dbPath);
+		const baselineActivityCount = Number(
+			(inspector.prepare("SELECT COUNT(*) AS count FROM admin_activity").get() as { count: number }).count
+		);
+		const baselineAuditCount = Number(
+			(inspector.prepare("SELECT COUNT(*) AS count FROM admin_audit_events").get() as { count: number }).count
+		);
+
+		inspector.exec(`
+			CREATE TRIGGER reject_admin_audit_event
+			BEFORE INSERT ON admin_audit_events
+			BEGIN
+				SELECT RAISE(ABORT, 'forced audit failure');
+			END
+		`);
+
+		await assert.rejects(
+			async () => await repository.updateUser(editor.id, {
+				auditActor: {
+					displayName: "Operations Admin",
+					role: "admin",
+					username: "ops-admin",
+				},
+				disabled: true,
+			}),
+			/forced audit failure/u
+		);
+		assert.equal(
+			(inspector.prepare("SELECT disabled_at FROM admin_users WHERE id = ?").get(editor.id) as { disabled_at: string | null }).disabled_at,
+			null
+		);
+
+		await assert.rejects(
+			async () => await repository.createUser({
+				displayName: "Second Reviewer",
+				password: "second-reviewer-password",
+				role: "editor",
+				username: "second-reviewer",
+			}),
+			/forced audit failure/u
+		);
+		assert.equal(
+			Number((inspector.prepare("SELECT COUNT(*) AS count FROM admin_users WHERE username = ?").get("second-reviewer") as { count: number }).count),
+			0
+		);
+
+		const setup = await repository.createMfaSetup("ops-admin");
+
+		await assert.rejects(
+			async () => await repository.enableMfa(
+				"ops-admin",
+				password,
+				setup.secret,
+				createAdminMfaCode(setup.secret)
+			),
+			/forced audit failure/u
+		);
+		const storedMfa = inspector.prepare(
+			"SELECT mfa_secret, mfa_enabled_at FROM admin_users WHERE username = ?"
+		).get("ops-admin") as { mfa_enabled_at: string | null; mfa_secret: string | null };
+
+		assert.equal(storedMfa.mfa_secret, null);
+		assert.equal(storedMfa.mfa_enabled_at, null);
+		assert.equal(
+			Number((inspector.prepare("SELECT COUNT(*) AS count FROM admin_activity").get() as { count: number }).count),
+			baselineActivityCount
+		);
+		assert.equal(
+			Number((inspector.prepare("SELECT COUNT(*) AS count FROM admin_audit_events").get() as { count: number }).count),
+			baselineAuditCount
+		);
+
+		inspector.close();
+	}
+	finally {
+		rmSync(root, { force: true, recursive: true });
+	}
+});

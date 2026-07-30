@@ -56,6 +56,22 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ballot_clarity_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ballot_clarity_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_ADMIN_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/ballot_clarity_test
     steps:
       - uses: actions/checkout@v7
 

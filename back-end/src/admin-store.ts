@@ -316,6 +316,17 @@ interface AuditRow {
 	timestamp: string;
 }
 
+interface AuditEventInput {
+	actor?: AdminAuditActor;
+	eventType: AdminAuditEventType;
+	metadata?: Record<string, unknown>;
+	summary: string;
+	targetId: string;
+	targetLabel: string;
+	targetType: string;
+	timestamp?: string;
+}
+
 interface GuidePackageRow {
 	id: string;
 	election_slug: string;
@@ -1215,77 +1226,78 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 	function createUser(input: CreateUserInput): AdminUser {
 		const username = input.username.trim().toLowerCase();
 		const displayName = input.displayName.trim();
-
 		const password = normalizeAdminPassword(input.password);
 
 		if (!username || !displayName)
 			throw new Error("Display name, username, role, and password are required.");
 
-		const existing = database.prepare(`
-			SELECT ${adminUserSelectColumns}
-			FROM admin_users
-			WHERE username = ?
-		`).get(username) as UserRow | undefined;
+		return runImmediateTransaction(() => {
+			const existing = database.prepare(`
+				SELECT ${adminUserSelectColumns}
+				FROM admin_users
+				WHERE username = ?
+			`).get(username) as UserRow | undefined;
 
-		if (existing)
-			throw new Error("An admin user with that username already exists.");
+			if (existing)
+				throw new Error("An admin user with that username already exists.");
 
-		const now = new Date().toISOString();
-		const id = `user-${randomUUID()}`;
+			const now = new Date().toISOString();
+			const id = `user-${randomUUID()}`;
 
-		database.prepare(`
-			INSERT INTO admin_users (
+			database.prepare(`
+				INSERT INTO admin_users (
+					id,
+					username,
+					display_name,
+					role,
+					password_hash,
+					created_at,
+					credentials_updated_at,
+					mfa_secret,
+					mfa_enabled_at,
+					updated_at,
+					disabled_at,
+					last_login_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`).run(
 				id,
 				username,
-				display_name,
-				role,
-				password_hash,
-				created_at,
-				credentials_updated_at,
-				mfa_secret,
-				mfa_enabled_at,
-				updated_at,
-				disabled_at,
-				last_login_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`).run(
-			id,
-			username,
-			displayName,
-			input.role,
-			hashPassword(password),
-			now,
-			now,
-			null,
-			null,
-			now,
-			null,
-			null
-		);
+				displayName,
+				input.role,
+				hashPassword(password),
+				now,
+				now,
+				null,
+				null,
+				now,
+				null,
+				null
+			);
 
-		logActivity("review", `Created ${input.role} user`, `${displayName} can now access the internal editorial workspace.`);
-		recordAuditEvent({
-			actor: input.auditActor,
-			eventType: "admin_user_create",
-			metadata: {
+			logActivity("review", `Created ${input.role} user`, `${displayName} can now access the internal editorial workspace.`);
+			appendAuditEvent({
+				actor: input.auditActor,
+				eventType: "admin_user_create",
+				metadata: {
+					role: input.role,
+					username
+				},
+				summary: `${displayName} was created as an ${input.role} account.`,
+				targetId: id,
+				targetLabel: displayName,
+				targetType: "admin_user",
+				timestamp: now
+			});
+
+			return {
+				createdAt: now,
+				credentialsUpdatedAt: now,
+				displayName,
+				id,
 				role: input.role,
 				username
-			},
-			summary: `${displayName} was created as an ${input.role} account.`,
-			targetId: id,
-			targetLabel: displayName,
-			targetType: "admin_user",
-			timestamp: now
+			};
 		});
-
-		return {
-			createdAt: now,
-			credentialsUpdatedAt: now,
-			displayName,
-			id,
-			role: input.role,
-			username
-		};
 	}
 
 	function createMfaSetup(username: string): AdminMfaSetupResponse {
@@ -1340,109 +1352,112 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 
 	function enableMfa(username: string, currentPassword: string, secret: string, mfaCode: string, auditActor?: AdminAuditActor): AdminUser {
 		const normalized = username.trim().toLowerCase();
-		const row = database.prepare(`
-			SELECT ${adminUserSelectColumns}
-			FROM admin_users
-			WHERE username = ?
-		`).get(normalized) as UserRow | undefined;
+		return runImmediateTransaction(() => {
+			const row = database.prepare(`
+				SELECT ${adminUserSelectColumns}
+				FROM admin_users
+				WHERE username = ?
+			`).get(normalized) as UserRow | undefined;
 
-		if (!row || row.disabled_at)
-			throw new Error("Admin user not found.");
+			if (!row || row.disabled_at)
+				throw new Error("Admin user not found.");
 
-		if (row.mfa_enabled_at)
-			throw new Error("Multi-factor authentication is already enabled for this account.");
+			if (row.mfa_enabled_at)
+				throw new Error("Multi-factor authentication is already enabled for this account.");
 
-		if (!verifyPassword(currentPassword, row.password_hash))
-			throw new Error("Current password was not accepted.");
+			if (!verifyPassword(currentPassword, row.password_hash))
+				throw new Error("Current password was not accepted.");
 
-		if (!verifyAdminMfaCodeSafely(secret, mfaCode))
-			throw new Error("The verification code was not accepted.");
+			if (!verifyAdminMfaCodeSafely(secret, mfaCode))
+				throw new Error("The verification code was not accepted.");
 
-		const nextCredentialsUpdatedAt = nextAdminCredentialTimestamp(row.credentials_updated_at || row.created_at);
+			const nextCredentialsUpdatedAt = nextAdminCredentialTimestamp(row.credentials_updated_at || row.created_at);
+			const encryptedMfaSecret = encryptAdminMfaSecret(row.id, secret, mfaEncryptionKey);
 
-		const encryptedMfaSecret = encryptAdminMfaSecret(row.id, secret, mfaEncryptionKey);
+			database.prepare(`
+				UPDATE admin_users
+				SET mfa_secret = ?, mfa_enabled_at = ?, credentials_updated_at = ?, updated_at = ?
+				WHERE id = ?
+			`).run(encryptedMfaSecret, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, row.id);
 
-		database.prepare(`
-			UPDATE admin_users
-			SET mfa_secret = ?, mfa_enabled_at = ?, credentials_updated_at = ?, updated_at = ?
-			WHERE id = ?
-		`).run(encryptedMfaSecret, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, row.id);
+			logActivity("review", "Enabled admin MFA", `${row.display_name} enabled multi-factor authentication.`);
+			appendAuditEvent({
+				actor: auditActor,
+				eventType: "admin_user_mfa_enable",
+				metadata: {
+					credentialsUpdatedAt: nextCredentialsUpdatedAt,
+					mfaEnabledAt: nextCredentialsUpdatedAt,
+					username: row.username
+				},
+				summary: `${row.display_name} enabled multi-factor authentication.`,
+				targetId: row.id,
+				targetLabel: row.display_name,
+				targetType: "admin_user",
+				timestamp: nextCredentialsUpdatedAt
+			});
 
-		logActivity("review", "Enabled admin MFA", `${row.display_name} enabled multi-factor authentication.`);
-		recordAuditEvent({
-			actor: auditActor,
-			eventType: "admin_user_mfa_enable",
-			metadata: {
-				credentialsUpdatedAt: nextCredentialsUpdatedAt,
-				mfaEnabledAt: nextCredentialsUpdatedAt,
-				username: row.username
-			},
-			summary: `${row.display_name} enabled multi-factor authentication.`,
-			targetId: row.id,
-			targetLabel: row.display_name,
-			targetType: "admin_user",
-			timestamp: nextCredentialsUpdatedAt
-		});
-
-		return rowToUser({
-			...row,
-			credentials_updated_at: nextCredentialsUpdatedAt,
-			mfa_enabled_at: nextCredentialsUpdatedAt,
-			mfa_secret: encryptedMfaSecret,
-			updated_at: nextCredentialsUpdatedAt
+			return rowToUser({
+				...row,
+				credentials_updated_at: nextCredentialsUpdatedAt,
+				mfa_enabled_at: nextCredentialsUpdatedAt,
+				mfa_secret: encryptedMfaSecret,
+				updated_at: nextCredentialsUpdatedAt
+			});
 		});
 	}
 
 	function disableMfa(username: string, currentPassword: string, mfaCode: string, auditActor?: AdminAuditActor): AdminUser {
 		const normalized = username.trim().toLowerCase();
-		const row = database.prepare(`
-			SELECT ${adminUserSelectColumns}
-			FROM admin_users
-			WHERE username = ?
-		`).get(normalized) as UserRow | undefined;
+		return runImmediateTransaction(() => {
+			const row = database.prepare(`
+				SELECT ${adminUserSelectColumns}
+				FROM admin_users
+				WHERE username = ?
+			`).get(normalized) as UserRow | undefined;
 
-		if (!row || row.disabled_at || !verifyPassword(currentPassword, row.password_hash))
-			throw new Error("Current password was not accepted.");
+			if (!row || row.disabled_at || !verifyPassword(currentPassword, row.password_hash))
+				throw new Error("Current password was not accepted.");
 
-		if (!row.mfa_secret || !row.mfa_enabled_at)
-			throw new Error("Multi-factor authentication is not enabled for this account.");
+			if (!row.mfa_secret || !row.mfa_enabled_at)
+				throw new Error("Multi-factor authentication is not enabled for this account.");
 
-		if (!verifyAdminMfaCodeSafely(
-			decryptAdminMfaSecret(row.id, row.mfa_secret, mfaEncryptionKey),
-			mfaCode
-		)) {
-			throw new Error("The verification code was not accepted.");
-		}
+			if (!verifyAdminMfaCodeSafely(
+				decryptAdminMfaSecret(row.id, row.mfa_secret, mfaEncryptionKey),
+				mfaCode
+			)) {
+				throw new Error("The verification code was not accepted.");
+			}
 
-		const nextCredentialsUpdatedAt = nextAdminCredentialTimestamp(row.credentials_updated_at || row.created_at);
+			const nextCredentialsUpdatedAt = nextAdminCredentialTimestamp(row.credentials_updated_at || row.created_at);
 
-		database.prepare(`
-			UPDATE admin_users
-			SET mfa_secret = NULL, mfa_enabled_at = NULL, credentials_updated_at = ?, updated_at = ?
-			WHERE id = ?
-		`).run(nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, row.id);
+			database.prepare(`
+				UPDATE admin_users
+				SET mfa_secret = NULL, mfa_enabled_at = NULL, credentials_updated_at = ?, updated_at = ?
+				WHERE id = ?
+			`).run(nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, row.id);
 
-		logActivity("review", "Disabled admin MFA", `${row.display_name} disabled multi-factor authentication.`);
-		recordAuditEvent({
-			actor: auditActor,
-			eventType: "admin_user_mfa_disable",
-			metadata: {
-				credentialsUpdatedAt: nextCredentialsUpdatedAt,
-				username: row.username
-			},
-			summary: `${row.display_name} disabled multi-factor authentication.`,
-			targetId: row.id,
-			targetLabel: row.display_name,
-			targetType: "admin_user",
-			timestamp: nextCredentialsUpdatedAt
-		});
+			logActivity("review", "Disabled admin MFA", `${row.display_name} disabled multi-factor authentication.`);
+			appendAuditEvent({
+				actor: auditActor,
+				eventType: "admin_user_mfa_disable",
+				metadata: {
+					credentialsUpdatedAt: nextCredentialsUpdatedAt,
+					username: row.username
+				},
+				summary: `${row.display_name} disabled multi-factor authentication.`,
+				targetId: row.id,
+				targetLabel: row.display_name,
+				targetType: "admin_user",
+				timestamp: nextCredentialsUpdatedAt
+			});
 
-		return rowToUser({
-			...row,
-			credentials_updated_at: nextCredentialsUpdatedAt,
-			mfa_enabled_at: null,
-			mfa_secret: null,
-			updated_at: nextCredentialsUpdatedAt
+			return rowToUser({
+				...row,
+				credentials_updated_at: nextCredentialsUpdatedAt,
+				mfa_enabled_at: null,
+				mfa_secret: null,
+				updated_at: nextCredentialsUpdatedAt
+			});
 		});
 	}
 
@@ -1469,132 +1484,134 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 	}
 
 	function updateUser(id: string, patch: UserPatch): AdminUsersResponse {
-		const current = database.prepare(`
-			SELECT ${adminUserSelectColumns}
-			FROM admin_users
-			WHERE id = ?
-		`).get(id) as UserRow | undefined;
+		return runImmediateTransaction(() => {
+			const current = database.prepare(`
+				SELECT ${adminUserSelectColumns}
+				FROM admin_users
+				WHERE id = ?
+			`).get(id) as UserRow | undefined;
 
-		if (!current)
-			throw new Error("Admin user not found.");
+			if (!current)
+				throw new Error("Admin user not found.");
 
-		const actorUsername = patch.auditActor?.username?.trim().toLowerCase();
-		const administrativeSelfMutation = patch.passwordChangeMode !== "self-service"
-			&& actorUsername === current.username
-			&& (patch.disabled !== undefined || patch.mfaReset === true || patch.password !== undefined);
+			const actorUsername = patch.auditActor?.username?.trim().toLowerCase();
+			const administrativeSelfMutation = patch.passwordChangeMode !== "self-service"
+				&& actorUsername === current.username
+				&& (patch.disabled !== undefined || patch.mfaReset === true || patch.password !== undefined);
 
-		if (administrativeSelfMutation) {
-			throw new Error(
-				"Use the self-service password or MFA workflow for the authenticated account. Administrative account recovery must target a different user."
-			);
-		}
+			if (administrativeSelfMutation) {
+				throw new Error(
+					"Use the self-service password or MFA workflow for the authenticated account. Administrative account recovery must target a different user."
+				);
+			}
 
-		const now = new Date().toISOString();
-		const nextDisabledAt = patch.disabled === undefined
-			? current.disabled_at
-			: patch.disabled
-				? current.disabled_at || now
-				: null;
-		const nextPasswordHash = patch.password === undefined
-			? current.password_hash
-			: hashPassword(normalizeAdminPassword(patch.password));
-		const shouldResetMfa = patch.mfaReset === true && Boolean(current.mfa_secret || current.mfa_enabled_at);
-		const shouldRotateCredentials = patch.password !== undefined || shouldResetMfa;
-		const nextCredentialsUpdatedAt = shouldRotateCredentials
-			? nextAdminCredentialTimestamp(current.credentials_updated_at || current.created_at)
-			: current.credentials_updated_at || current.created_at;
-		const nextUpdatedAt = shouldRotateCredentials ? nextCredentialsUpdatedAt : now;
-		const nextMfaSecret = patch.mfaReset === true ? null : current.mfa_secret;
-		const nextMfaEnabledAt = patch.mfaReset === true ? null : current.mfa_enabled_at;
+			const now = new Date().toISOString();
+			const nextDisabledAt = patch.disabled === undefined
+				? current.disabled_at
+				: patch.disabled
+					? current.disabled_at || now
+					: null;
+			const nextPasswordHash = patch.password === undefined
+				? current.password_hash
+				: hashPassword(normalizeAdminPassword(patch.password));
+			const shouldResetMfa = patch.mfaReset === true && Boolean(current.mfa_secret || current.mfa_enabled_at);
+			const shouldRotateCredentials = patch.password !== undefined || shouldResetMfa;
+			const nextCredentialsUpdatedAt = shouldRotateCredentials
+				? nextAdminCredentialTimestamp(current.credentials_updated_at || current.created_at)
+				: current.credentials_updated_at || current.created_at;
+			const nextUpdatedAt = shouldRotateCredentials ? nextCredentialsUpdatedAt : now;
+			const nextMfaSecret = patch.mfaReset === true ? null : current.mfa_secret;
+			const nextMfaEnabledAt = patch.mfaReset === true ? null : current.mfa_enabled_at;
 
-		if (patch.disabled && !current.disabled_at && current.role === "admin") {
-			const remainingAdmins = database.prepare(`
+			if (patch.disabled && !current.disabled_at && current.role === "admin") {
+				const remainingAdmins = database.prepare(`
 				SELECT COUNT(*) AS count
 				FROM admin_users
 				WHERE role = 'admin' AND disabled_at IS NULL AND id <> ?
 			`).get(id) as unknown as DatabaseCountRow;
 
-			if (Number(remainingAdmins.count) < 1)
-				throw new Error("Cannot disable the last active admin user.");
-		}
+				if (Number(remainingAdmins.count) < 1)
+					throw new Error("Cannot disable the last active admin user.");
+			}
 
-		database.prepare(`
+			database.prepare(`
 			UPDATE admin_users
 			SET disabled_at = ?, password_hash = ?, mfa_secret = ?, mfa_enabled_at = ?, credentials_updated_at = ?, updated_at = ?
 			WHERE id = ?
 		`).run(nextDisabledAt, nextPasswordHash, nextMfaSecret, nextMfaEnabledAt, nextCredentialsUpdatedAt, nextUpdatedAt, id);
 
-		if (patch.disabled !== undefined && nextDisabledAt !== current.disabled_at) {
-			logActivity(
-				"review",
-				patch.disabled ? "Disabled admin user" : "Restored admin user",
-				`${current.display_name} ${patch.disabled ? "can no longer sign in" : "can sign in again"}.`
-			);
-			recordAuditEvent({
-				actor: patch.auditActor,
-				eventType: patch.disabled ? "admin_user_disable" : "admin_user_restore",
-				metadata: {
-					disabledAt: nextDisabledAt,
-					username: current.username
-				},
-				summary: `${current.display_name} ${patch.disabled ? "was disabled" : "was restored"}.`,
-				targetId: current.id,
-				targetLabel: current.display_name,
-				targetType: "admin_user",
-				timestamp: now
-			});
-		}
+			if (patch.disabled !== undefined && nextDisabledAt !== current.disabled_at) {
+				logActivity(
+					"review",
+					patch.disabled ? "Disabled admin user" : "Restored admin user",
+					`${current.display_name} ${patch.disabled ? "can no longer sign in" : "can sign in again"}.`
+				);
+				appendAuditEvent({
+					actor: patch.auditActor,
+					eventType: patch.disabled ? "admin_user_disable" : "admin_user_restore",
+					metadata: {
+						disabledAt: nextDisabledAt,
+						username: current.username
+					},
+					summary: `${current.display_name} ${patch.disabled ? "was disabled" : "was restored"}.`,
+					targetId: current.id,
+					targetLabel: current.display_name,
+					targetType: "admin_user",
+					timestamp: now
+				});
+			}
 
-		if (patch.password !== undefined) {
-			const isSelfService = patch.passwordChangeMode === "self-service";
+			if (patch.password !== undefined) {
+				const isSelfService = patch.passwordChangeMode === "self-service";
 
-			logActivity(
-				"review",
-				isSelfService ? "Changed admin password" : "Reset admin password",
-				isSelfService
-					? `${current.display_name} changed their own password. Existing sessions for this account are no longer valid.`
-					: `${current.display_name} received a new temporary password. Existing sessions for this account are no longer valid.`
-			);
-			recordAuditEvent({
-				actor: patch.auditActor,
-				eventType: isSelfService ? "admin_user_password_change" : "admin_user_password_reset",
-				metadata: {
-					credentialsUpdatedAt: nextCredentialsUpdatedAt,
-					selfService: isSelfService,
-					username: current.username
-				},
-				summary: isSelfService
-					? `${current.display_name} changed their own password.`
-					: `${current.display_name} received an admin password reset.`,
-				targetId: current.id,
-				targetLabel: current.display_name,
-				targetType: "admin_user",
-				timestamp: nextCredentialsUpdatedAt
-			});
-		}
+				logActivity(
+					"review",
+					isSelfService ? "Changed admin password" : "Reset admin password",
+					isSelfService
+						? `${current.display_name} changed their own password. Existing sessions for this account are no longer valid.`
+						: `${current.display_name} received a new temporary password. Existing sessions for this account are no longer valid.`
+				);
+				appendAuditEvent({
+					actor: patch.auditActor,
+					eventType: isSelfService ? "admin_user_password_change" : "admin_user_password_reset",
+					metadata: {
+						credentialsUpdatedAt: nextCredentialsUpdatedAt,
+						selfService: isSelfService,
+						username: current.username
+					},
+					summary: isSelfService
+						? `${current.display_name} changed their own password.`
+						: `${current.display_name} received an admin password reset.`,
+					targetId: current.id,
+					targetLabel: current.display_name,
+					targetType: "admin_user",
+					timestamp: nextCredentialsUpdatedAt
+				});
+			}
 
-		if (shouldResetMfa) {
-			logActivity(
-				"review",
-				"Reset admin MFA",
-				`${current.display_name} must enroll multi-factor authentication again before MFA is required. Existing sessions for this account are no longer valid.`
-			);
-			recordAuditEvent({
-				actor: patch.auditActor,
-				eventType: "admin_user_mfa_reset",
-				metadata: {
-					credentialsUpdatedAt: nextCredentialsUpdatedAt,
-					username: current.username
-				},
-				summary: `${current.display_name} had multi-factor authentication reset by an administrator.`,
-				targetId: current.id,
-				targetLabel: current.display_name,
-				targetType: "admin_user",
-				timestamp: nextCredentialsUpdatedAt
-			});
-		}
+			if (shouldResetMfa) {
+				logActivity(
+					"review",
+					"Reset admin MFA",
+					`${current.display_name} must enroll multi-factor authentication again before MFA is required. Existing sessions for this account are no longer valid.`
+				);
+				appendAuditEvent({
+					actor: patch.auditActor,
+					eventType: "admin_user_mfa_reset",
+					metadata: {
+						credentialsUpdatedAt: nextCredentialsUpdatedAt,
+						username: current.username
+					},
+					summary: `${current.display_name} had multi-factor authentication reset by an administrator.`,
+					targetId: current.id,
+					targetLabel: current.display_name,
+					targetType: "admin_user",
+					timestamp: nextCredentialsUpdatedAt
+				});
+			}
 
-		return listUsers();
+			return listUsers();
+		});
 	}
 
 	function logActivity(type: AdminActivityItem["type"], label: string, summary: string) {
@@ -1606,88 +1623,86 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 		`).run(`activity-${randomUUID()}`, label, type, timestamp, summary);
 	}
 
-	function recordAuditEvent(input: {
-		actor?: AdminAuditActor;
-		eventType: AdminAuditEventType;
-		metadata?: Record<string, unknown>;
-		summary: string;
-		targetId: string;
-		targetLabel: string;
-		targetType: string;
-		timestamp?: string;
-	}) {
-		const actor = normalizeAuditActor(input.actor);
-		const metadata = stableStringify(input.metadata ?? {});
-		const timestamp = input.timestamp || new Date().toISOString();
-
+	function runImmediateTransaction<T>(work: () => T) {
 		database.exec("BEGIN IMMEDIATE");
 
 		try {
-			const last = database.prepare(`
-				SELECT sequence, event_hash
-				FROM admin_audit_events
-				ORDER BY sequence DESC
-				LIMIT 1
-			`).get() as Pick<AuditRow, "event_hash" | "sequence"> | undefined;
-			const previousHash = last?.event_hash || null;
-			const sequence = Number(last?.sequence ?? 0) + 1;
-			const eventWithoutHash: Omit<AuditRow, "event_hash"> = {
-				actor_display_name: actor.displayName,
-				actor_role: actor.role,
-				actor_username: actor.username,
-				event_type: input.eventType,
-				id: `audit-${randomUUID()}`,
-				metadata,
-				previous_hash: previousHash,
-				sequence,
-				summary: input.summary,
-				target_id: input.targetId,
-				target_label: input.targetLabel,
-				target_type: input.targetType,
-				timestamp
-			};
-			const eventHash = hashAuditEvent(eventWithoutHash);
-
-			database.prepare(`
-				INSERT INTO admin_audit_events (
-					id,
-					sequence,
-					timestamp,
-					event_type,
-					actor_username,
-					actor_display_name,
-					actor_role,
-					target_type,
-					target_id,
-					target_label,
-					summary,
-					metadata,
-					previous_hash,
-					event_hash
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`).run(
-				eventWithoutHash.id,
-				eventWithoutHash.sequence,
-				eventWithoutHash.timestamp,
-				eventWithoutHash.event_type,
-				eventWithoutHash.actor_username,
-				eventWithoutHash.actor_display_name,
-				eventWithoutHash.actor_role,
-				eventWithoutHash.target_type,
-				eventWithoutHash.target_id,
-				eventWithoutHash.target_label,
-				eventWithoutHash.summary,
-				eventWithoutHash.metadata,
-				eventWithoutHash.previous_hash,
-				eventHash
-			);
-
+			const result = work();
 			database.exec("COMMIT");
+			return result;
 		}
 		catch (error) {
 			database.exec("ROLLBACK");
 			throw error;
 		}
+	}
+
+	function appendAuditEvent(input: AuditEventInput) {
+		const actor = normalizeAuditActor(input.actor);
+		const metadata = stableStringify(input.metadata ?? {});
+		const timestamp = input.timestamp || new Date().toISOString();
+		const last = database.prepare(`
+			SELECT sequence, event_hash
+			FROM admin_audit_events
+			ORDER BY sequence DESC
+			LIMIT 1
+		`).get() as Pick<AuditRow, "event_hash" | "sequence"> | undefined;
+		const previousHash = last?.event_hash || null;
+		const sequence = Number(last?.sequence ?? 0) + 1;
+		const eventWithoutHash: Omit<AuditRow, "event_hash"> = {
+			actor_display_name: actor.displayName,
+			actor_role: actor.role,
+			actor_username: actor.username,
+			event_type: input.eventType,
+			id: `audit-${randomUUID()}`,
+			metadata,
+			previous_hash: previousHash,
+			sequence,
+			summary: input.summary,
+			target_id: input.targetId,
+			target_label: input.targetLabel,
+			target_type: input.targetType,
+			timestamp
+		};
+		const eventHash = hashAuditEvent(eventWithoutHash);
+
+		database.prepare(`
+			INSERT INTO admin_audit_events (
+				id,
+				sequence,
+				timestamp,
+				event_type,
+				actor_username,
+				actor_display_name,
+				actor_role,
+				target_type,
+				target_id,
+				target_label,
+				summary,
+				metadata,
+				previous_hash,
+				event_hash
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(
+			eventWithoutHash.id,
+			eventWithoutHash.sequence,
+			eventWithoutHash.timestamp,
+			eventWithoutHash.event_type,
+			eventWithoutHash.actor_username,
+			eventWithoutHash.actor_display_name,
+			eventWithoutHash.actor_role,
+			eventWithoutHash.target_type,
+			eventWithoutHash.target_id,
+			eventWithoutHash.target_label,
+			eventWithoutHash.summary,
+			eventWithoutHash.metadata,
+			eventWithoutHash.previous_hash,
+			eventHash
+		);
+	}
+
+	function recordAuditEvent(input: AuditEventInput) {
+		runImmediateTransaction(() => appendAuditEvent(input));
 	}
 
 	function listActivity(limit = 8) {
