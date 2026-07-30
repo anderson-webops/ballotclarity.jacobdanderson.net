@@ -217,7 +217,7 @@ test("Postgres preserves workflow invariants and rolls back unaudited mutations"
 			baselineAuditCount
 		);
 
-		const correction = (await repository.listCorrections()).corrections[0];
+		const correction = (await repository.listCorrections()).corrections.find(item => item.status !== "new");
 		const source = (await repository.listSourceMonitor()).sources[0];
 
 		assert.ok(correction);
