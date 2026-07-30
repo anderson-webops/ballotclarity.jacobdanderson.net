@@ -44,6 +44,7 @@ const activitySeed = demoAdminOverview.recentActivity;
 function createApp(options: Parameters<typeof createApplication>[0] = {}) {
 	return createApplication({
 		activeLookupCookieSecret: "test-active-lookup-cookie-secret-that-is-long-enough",
+		adminMfaEncryptionKey: "test-admin-mfa-encryption-key-that-is-long-enough",
 		allowLegacyAdminActorHeadersForTesting: true,
 		...options
 	});

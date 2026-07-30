@@ -127,6 +127,7 @@ interface CreateAppOptions {
 	activeLookupCookieSecret?: string | null;
 	adminApiKey?: string | null;
 	adminDbPath?: string | null;
+	adminMfaEncryptionKey?: string | null;
 	adminSessionSecret?: string | null;
 	addressCacheEncryptionKey?: string | null;
 	allowLegacyAdminActorHeadersForTesting?: boolean;
@@ -2796,6 +2797,7 @@ export async function createApp(options: CreateAppOptions = {}) {
 		dbPath: options.adminDbPath,
 		databaseUrl: process.env.ADMIN_DATABASE_URL || process.env.DATABASE_URL || null,
 		guidePackageSeed,
+		mfaEncryptionKey: options.adminMfaEncryptionKey ?? process.env.ADMIN_MFA_ENCRYPTION_KEY ?? null,
 		sourceMonitorSeed: options.sourceMonitorSeed
 	});
 	const logger = createLogger("ballot-clarity-api");

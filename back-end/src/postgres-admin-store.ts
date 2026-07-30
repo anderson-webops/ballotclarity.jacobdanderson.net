@@ -31,6 +31,11 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 import {
+	decryptAdminMfaSecret,
+	encryptAdminMfaSecret,
+	migrateAdminMfaSecret,
+} from "./admin-mfa-secret.js";
+import {
 	buildAdminMfaOtpAuthUrl,
 	createAdminMfaSecret,
 	verifyAdminMfaCode
@@ -402,6 +407,7 @@ function rowToGuidePackage(row: GuidePackageRow): GuidePackageWorkflow {
 }
 
 async function seedPostgresDatabase(pool: Pool, options: AdminRepositoryOptions) {
+	const mfaEncryptionKey = options.mfaEncryptionKey ?? process.env.ADMIN_MFA_ENCRYPTION_KEY ?? "";
 	const schema = readFileSync(resolvePostgresSchemaPath(), "utf8");
 	const contentSeed = options.contentSeed ?? [];
 	const correctionSeed = options.correctionSeed ?? [];
@@ -424,6 +430,46 @@ async function seedPostgresDatabase(pool: Pool, options: AdminRepositoryOptions)
 		SET credentials_updated_at = COALESCE(credentials_updated_at, created_at, updated_at)
 		WHERE credentials_updated_at IS NULL
 	`);
+	const storedMfaSecrets = await pool.query<Pick<UserRow, "id" | "mfa_secret">>(`
+		SELECT id, mfa_secret
+		FROM admin_users
+		WHERE mfa_secret IS NOT NULL
+	`);
+
+	if (storedMfaSecrets.rows.length) {
+		const client = await pool.connect();
+
+		try {
+			await client.query("BEGIN");
+
+			for (const row of storedMfaSecrets.rows) {
+				if (!row.mfa_secret)
+					continue;
+
+				const migratedSecret = migrateAdminMfaSecret(
+					row.id,
+					row.mfa_secret,
+					mfaEncryptionKey
+				);
+
+				if (migratedSecret !== row.mfa_secret) {
+					await client.query(
+						"UPDATE admin_users SET mfa_secret = $1 WHERE id = $2",
+						[migratedSecret, row.id]
+					);
+				}
+			}
+
+			await client.query("COMMIT");
+		}
+		catch (error) {
+			await client.query("ROLLBACK");
+			throw error;
+		}
+		finally {
+			client.release();
+		}
+	}
 	await pool.query(`
 		UPDATE admin_content
 		SET publish_approved_by = COALESCE(publish_approved_by, 'Legacy publish state'),
@@ -642,6 +688,7 @@ async function seedPostgresDatabase(pool: Pool, options: AdminRepositoryOptions)
 
 export async function createPostgresAdminRepository(options: AdminRepositoryOptions = {}): Promise<AdminRepository> {
 	const connectionString = options.databaseUrl || process.env.ADMIN_DATABASE_URL || process.env.DATABASE_URL;
+	const mfaEncryptionKey = options.mfaEncryptionKey ?? process.env.ADMIN_MFA_ENCRYPTION_KEY ?? "";
 
 	if (!connectionString)
 		throw new Error("Postgres admin store requires ADMIN_DATABASE_URL or DATABASE_URL.");
@@ -1023,7 +1070,18 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 			`, [userId]);
 			const row = result.rows[0];
 
-			return Boolean(row?.mfa_secret && row.mfa_enabled_at && verifyAdminMfaCodeSafely(row.mfa_secret, mfaCode));
+			if (!row?.mfa_secret || !row.mfa_enabled_at)
+				return false;
+
+			try {
+				return verifyAdminMfaCodeSafely(
+					decryptAdminMfaSecret(row.id, row.mfa_secret, mfaEncryptionKey),
+					mfaCode
+				);
+			}
+			catch {
+				return false;
+			}
 		},
 		async enableMfa(username, currentPassword, secret, mfaCode, auditActor): Promise<AdminUser> {
 			const normalized = username.trim().toLowerCase();
@@ -1048,11 +1106,13 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 
 			const nextCredentialsUpdatedAt = nextAdminCredentialTimestamp(row.credentials_updated_at || row.created_at);
 
+			const encryptedMfaSecret = encryptAdminMfaSecret(row.id, secret, mfaEncryptionKey);
+
 			await pool.query(`
 				UPDATE admin_users
 				SET mfa_secret = $1, mfa_enabled_at = $2, credentials_updated_at = $3, updated_at = $4
 				WHERE id = $5
-			`, [secret, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, row.id]);
+			`, [encryptedMfaSecret, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, row.id]);
 
 			await logActivity("review", "Enabled admin MFA", `${row.display_name} enabled multi-factor authentication.`);
 			await recordAuditEvent({
@@ -1074,7 +1134,7 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 				...row,
 				credentials_updated_at: nextCredentialsUpdatedAt,
 				mfa_enabled_at: nextCredentialsUpdatedAt,
-				mfa_secret: secret,
+				mfa_secret: encryptedMfaSecret,
 				updated_at: nextCredentialsUpdatedAt
 			});
 		},
@@ -1093,8 +1153,12 @@ export async function createPostgresAdminRepository(options: AdminRepositoryOpti
 			if (!row.mfa_secret || !row.mfa_enabled_at)
 				throw new Error("Multi-factor authentication is not enabled for this account.");
 
-			if (!verifyAdminMfaCodeSafely(row.mfa_secret, mfaCode))
+			if (!verifyAdminMfaCodeSafely(
+				decryptAdminMfaSecret(row.id, row.mfa_secret, mfaEncryptionKey),
+				mfaCode
+			)) {
 				throw new Error("The verification code was not accepted.");
+			}
 
 			const nextCredentialsUpdatedAt = nextAdminCredentialTimestamp(row.credentials_updated_at || row.created_at);
 

@@ -659,6 +659,11 @@ export function evaluateProductionConfig({
 	checkSecret({ errors, key: "ADMIN_SESSION_SECRET", value: env.ADMIN_SESSION_SECRET });
 	checkSecret({
 		errors,
+		key: "ADMIN_MFA_ENCRYPTION_KEY",
+		value: env.ADMIN_MFA_ENCRYPTION_KEY,
+	});
+	checkSecret({
+		errors,
 		key: "ACTIVE_LOOKUP_COOKIE_SECRET",
 		value: env.ACTIVE_LOOKUP_COOKIE_SECRET,
 	});

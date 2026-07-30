@@ -122,6 +122,7 @@ function buildProductionEnv(overrides: Record<string, string | undefined> = {}) 
 		ADMIN_LOGIN_LOCKOUT_MS: "1800000",
 		ADMIN_LOGIN_MAX_ATTEMPTS: "5",
 		ADMIN_LOGIN_WINDOW_MS: "900000",
+		ADMIN_MFA_ENCRYPTION_KEY: "f".repeat(48),
 		ADMIN_SESSION_SECRET: "b".repeat(48),
 		ADMIN_STORE_DRIVER: "postgres",
 		CONTACT_ADDRESS: "hello@ballotclarity.org",
@@ -193,6 +194,7 @@ test("production config check fails sqlite admin persistence and weak secrets", 
 			ADDRESS_CACHE_ENCRYPTION_KEY: "replace-with-an-address-cache-key",
 			ADMIN_API_KEY: "replace-with-a-long-random-internal-key",
 			ADMIN_DATABASE_URL: "",
+			ADMIN_MFA_ENCRYPTION_KEY: "replace-with-a-long-random-admin-mfa-encryption-key",
 			ADMIN_SESSION_SECRET: "short",
 			ADMIN_STORE_DRIVER: "sqlite",
 		}),
@@ -202,6 +204,7 @@ test("production config check fails sqlite admin persistence and weak secrets", 
 	assert.ok(issueIds(evaluation, "errors").includes("active_lookup_cookie_secret.short"));
 	assert.ok(issueIds(evaluation, "errors").includes("address_cache_encryption_key.weak"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_api_key.weak"));
+	assert.ok(issueIds(evaluation, "errors").includes("admin_mfa_encryption_key.weak"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_session_secret.short"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_store.driver"));
 	assert.ok(issueIds(evaluation, "errors").includes("admin_store.database_url_missing"));

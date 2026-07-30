@@ -36,6 +36,11 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import {
+	decryptAdminMfaSecret,
+	encryptAdminMfaSecret,
+	migrateAdminMfaSecret,
+} from "./admin-mfa-secret.js";
+import {
 	buildAdminMfaOtpAuthUrl,
 	createAdminMfaSecret,
 	verifyAdminMfaCode
@@ -62,6 +67,7 @@ export interface AdminRepositoryOptions {
 	activitySeed?: AdminActivityItem[];
 	sourceMonitorSeed?: AdminSourceMonitorItem[];
 	guidePackageSeed?: GuidePackageWorkflow[];
+	mfaEncryptionKey?: string | null;
 }
 
 export interface AdminAuditActor {
@@ -858,6 +864,7 @@ function ensureColumn(database: DatabaseSync, table: string, column: string, def
 export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}): AdminRepository {
 	const resolvedPath = ensureDatabasePath(options.dbPath || process.env.ADMIN_DB_PATH || defaultDbPath);
 	const database = new DatabaseSync(resolvedPath);
+	const mfaEncryptionKey = options.mfaEncryptionKey ?? process.env.ADMIN_MFA_ENCRYPTION_KEY ?? "";
 	const schema = readFileSync(resolveSqliteSchemaPath(), "utf8");
 	const contentSeed = options.contentSeed ?? [];
 	const correctionSeed = options.correctionSeed ?? [];
@@ -883,6 +890,40 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 		SET credentials_updated_at = COALESCE(credentials_updated_at, created_at, updated_at)
 		WHERE credentials_updated_at IS NULL
 	`).run();
+	const storedMfaSecrets = database.prepare(`
+		SELECT id, mfa_secret
+		FROM admin_users
+		WHERE mfa_secret IS NOT NULL
+	`).all() as Array<{ id: string; mfa_secret: string }>;
+
+	if (storedMfaSecrets.length) {
+		database.exec("BEGIN IMMEDIATE");
+
+		try {
+			const updateMfaSecret = database.prepare(`
+				UPDATE admin_users
+				SET mfa_secret = ?
+				WHERE id = ?
+			`);
+
+			for (const row of storedMfaSecrets) {
+				const migratedSecret = migrateAdminMfaSecret(
+					row.id,
+					row.mfa_secret,
+					mfaEncryptionKey
+				);
+
+				if (migratedSecret !== row.mfa_secret)
+					updateMfaSecret.run(migratedSecret, row.id);
+			}
+
+			database.exec("COMMIT");
+		}
+		catch (error) {
+			database.exec("ROLLBACK");
+			throw error;
+		}
+	}
 	database.prepare(`
 		UPDATE admin_content
 		SET publish_approved_by = COALESCE(publish_approved_by, 'Legacy publish state'),
@@ -1290,7 +1331,18 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 			WHERE id = ?
 		`).get(userId) as UserRow | undefined;
 
-		return Boolean(row?.mfa_secret && row.mfa_enabled_at && verifyAdminMfaCodeSafely(row.mfa_secret, mfaCode));
+		if (!row?.mfa_secret || !row.mfa_enabled_at)
+			return false;
+
+		try {
+			return verifyAdminMfaCodeSafely(
+				decryptAdminMfaSecret(row.id, row.mfa_secret, mfaEncryptionKey),
+				mfaCode
+			);
+		}
+		catch {
+			return false;
+		}
 	}
 
 	function enableMfa(username: string, currentPassword: string, secret: string, mfaCode: string, auditActor?: AdminAuditActor): AdminUser {
@@ -1315,11 +1367,13 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 
 		const nextCredentialsUpdatedAt = nextAdminCredentialTimestamp(row.credentials_updated_at || row.created_at);
 
+		const encryptedMfaSecret = encryptAdminMfaSecret(row.id, secret, mfaEncryptionKey);
+
 		database.prepare(`
 			UPDATE admin_users
 			SET mfa_secret = ?, mfa_enabled_at = ?, credentials_updated_at = ?, updated_at = ?
 			WHERE id = ?
-		`).run(secret, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, row.id);
+		`).run(encryptedMfaSecret, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, nextCredentialsUpdatedAt, row.id);
 
 		logActivity("review", "Enabled admin MFA", `${row.display_name} enabled multi-factor authentication.`);
 		recordAuditEvent({
@@ -1341,7 +1395,7 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 			...row,
 			credentials_updated_at: nextCredentialsUpdatedAt,
 			mfa_enabled_at: nextCredentialsUpdatedAt,
-			mfa_secret: secret,
+			mfa_secret: encryptedMfaSecret,
 			updated_at: nextCredentialsUpdatedAt
 		});
 	}
@@ -1360,8 +1414,12 @@ export function createSqliteAdminRepository(options: AdminRepositoryOptions = {}
 		if (!row.mfa_secret || !row.mfa_enabled_at)
 			throw new Error("Multi-factor authentication is not enabled for this account.");
 
-		if (!verifyAdminMfaCodeSafely(row.mfa_secret, mfaCode))
+		if (!verifyAdminMfaCodeSafely(
+			decryptAdminMfaSecret(row.id, row.mfa_secret, mfaEncryptionKey),
+			mfaCode
+		)) {
 			throw new Error("The verification code was not accepted.");
+		}
 
 		const nextCredentialsUpdatedAt = nextAdminCredentialTimestamp(row.credentials_updated_at || row.created_at);
 

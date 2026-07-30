@@ -200,6 +200,7 @@ Server-only variables:
 - `ADMIN_API_BASE`: server-side Nuxt proxy target for admin-only API requests; this should be private to the Nuxt server and never exposed as the browser's direct `/api/admin/*` target
 - `ADMIN_API_KEY`: shared secret between the Nuxt admin proxy and the Express admin endpoints
 - `ADMIN_SESSION_SECRET`: cookie-signing secret for Nuxt admin sessions
+- `ADMIN_MFA_ENCRYPTION_KEY`: dedicated authenticated-encryption key for admin TOTP seeds at rest; use a unique random value of at least 32 characters
 - `ACTIVE_LOOKUP_COOKIE_SECRET`: dedicated authenticated-encryption secret for the HttpOnly saved-area result cookie; use a unique random value of at least 32 characters
 - `ADDRESS_CACHE_ENCRYPTION_KEY`: dedicated key for address-cache HMAC identifiers and authenticated payload encryption; use a unique random value of at least 32 characters
 - `ADMIN_STORE_DRIVER`: `postgres` for production, or `sqlite` only as a fallback for single-instance local/dev use; when omitted, the backend will auto-select Postgres if `ADMIN_DATABASE_URL` or `DATABASE_URL` is present
@@ -242,7 +243,7 @@ One-time or scheduled ingestion variables:
 - `LAUNCH_DIRECTORY_FILE`: local JSON file written by `npm run launch-directory:sync`
 - `LAUNCH_PROFILE_LATITUDE`, `LAUNCH_PROFILE_LONGITUDE`: optional probe point used for launch-area Open States geo matching in the launch-directory snapshot
 
-For production, use unique random values for `ADMIN_API_KEY`, `ADMIN_BOOTSTRAP_PASSWORD`, `ADMIN_SESSION_SECRET`, `ACTIVE_LOOKUP_COOKIE_SECRET`, `ADDRESS_CACHE_ENCRYPTION_KEY`, and `CONTACT_ADDRESS_SESSION_SECRET`. The front-end and back-end must share the same `ADMIN_API_KEY`. Keep every secret in the server environment only and do not reuse values across purposes. Admin MFA TOTP secrets are stored in the admin database, so protect database files, snapshots, and backups as sensitive operational secrets.
+For production, use unique random values for `ADMIN_API_KEY`, `ADMIN_BOOTSTRAP_PASSWORD`, `ADMIN_SESSION_SECRET`, `ADMIN_MFA_ENCRYPTION_KEY`, `ACTIVE_LOOKUP_COOKIE_SECRET`, `ADDRESS_CACHE_ENCRYPTION_KEY`, and `CONTACT_ADDRESS_SESSION_SECRET`. The front-end and back-end must share the same `ADMIN_API_KEY`. Keep every secret in the server environment only and do not reuse values across purposes. Admin MFA TOTP secrets are stored as per-account authenticated ciphertext in the admin database; keep the encryption key separate from database files, snapshots, and backups.
 The public browser should call `/api/admin/*` on the Nuxt origin only. Those requests must terminate at the Nuxt server so the session cookie and server-held `ADMIN_API_KEY` stay inside the bridge layer.
 Optional ballot-content provider URLs must be valid HTTPS URLs in production when set. Missing optional providers are allowed, but one-sided key/endpoint setups are flagged by `npm run verify:production` so pending paid or partner integrations do not look active by accident.
 
@@ -427,7 +428,7 @@ These endpoints live on the Express service, but they are intended to be reached
 - Set `NUXT_PUBLIC_API_BASE` to the public API origin used by the browser.
 - Set `NUXT_PUBLIC_OPERATOR_LEGAL_NAME`, `NUXT_PUBLIC_GOVERNING_LAW`, and `NUXT_PUBLIC_VENUE` so the public Terms and Privacy pages publish explicit production policy details instead of relying on defaults.
 - Set `ADMIN_API_BASE` to the server-side admin API origin the Nuxt server can reach privately.
-- Set `ADMIN_API_KEY` and `ADMIN_SESSION_SECRET` in the server environments only.
+- Set `ADMIN_API_KEY`, `ADMIN_SESSION_SECRET`, and `ADMIN_MFA_ENCRYPTION_KEY` in the server environments only.
 - Set unique `ACTIVE_LOOKUP_COOKIE_SECRET` and `ADDRESS_CACHE_ENCRYPTION_KEY` values in the backend server environment.
 - Set `CONTACT_ADDRESS` and `CONTACT_ADDRESS_SESSION_SECRET` so the public contact route does not fall back to built-in local-development defaults.
 - Use `ADMIN_STORE_DRIVER=postgres` together with `ADMIN_DATABASE_URL` for production. SQLite should only be used as a fallback for constrained local or temporary environments.
@@ -475,7 +476,7 @@ Local stack notes:
 ## Server-side provisioning after merge
 
 1. Provision separate public and admin-capable server environments for the Nuxt front end and Express API.
-2. Set `NUXT_PUBLIC_SITE_URL`, `NUXT_PUBLIC_API_BASE`, `NUXT_PUBLIC_OPERATOR_LEGAL_NAME`, `NUXT_PUBLIC_GOVERNING_LAW`, `NUXT_PUBLIC_VENUE`, `ADMIN_API_BASE`, `ADMIN_API_KEY`, `ADMIN_SESSION_SECRET`, `ACTIVE_LOOKUP_COOKIE_SECRET`, `ADDRESS_CACHE_ENCRYPTION_KEY`, `CONTACT_ADDRESS`, `CONTACT_ADDRESS_SESSION_SECRET`, and either `ADMIN_DATABASE_URL` or `ADMIN_DB_PATH`.
+2. Set `NUXT_PUBLIC_SITE_URL`, `NUXT_PUBLIC_API_BASE`, `NUXT_PUBLIC_OPERATOR_LEGAL_NAME`, `NUXT_PUBLIC_GOVERNING_LAW`, `NUXT_PUBLIC_VENUE`, `ADMIN_API_BASE`, `ADMIN_API_KEY`, `ADMIN_SESSION_SECRET`, `ADMIN_MFA_ENCRYPTION_KEY`, `ACTIVE_LOOKUP_COOKIE_SECRET`, `ADDRESS_CACHE_ENCRYPTION_KEY`, `CONTACT_ADDRESS`, `CONTACT_ADDRESS_SESSION_SECRET`, and either `ADMIN_DATABASE_URL` or `ADMIN_DB_PATH`.
 3. Choose the admin store mode:
    Set `ADMIN_STORE_DRIVER=postgres` plus `ADMIN_DATABASE_URL` for managed Postgres. Use SQLite only if there is a deliberate single-instance fallback reason, and then create the directory that will hold the SQLite file referenced by `ADMIN_DB_PATH`, with backup and restore procedures in place.
 4. Run `npm run bootstrap-admin` once to create the first persisted admin account.
