@@ -40,7 +40,7 @@ Guide publication requires an authenticated administrator with enrolled MFA, a s
 - Restricted optional exact-ZIP event logging to ZIP-only metadata, serialized writes, a 10 MiB active file plus one backup, and `0700` directory/`0600` file permissions.
 - Required an explicit trusted-proxy provenance assertion before proxy geography headers can enable automatic location guessing. The edge must remove client-supplied copies before writing those headers.
 - Rejected unsafe remote coverage destinations and redirects, bounded coverage downloads, sanitized public links and structured data, and kept unreviewed or unpublished election content out of public routes.
-- Aligned local, CI, and package metadata on Node 24.18.0 LTS with npm 11.16.0; optional native packages are installed and checked on Linux ARM64.
+- Aligned local, CI, and package metadata on Node 24.18.1 LTS with npm 12.0.2; optional native packages are installed and checked on Linux ARM64.
 - Replaced Nitro's vulnerable Archiver 7 dependency path with a tested local compatibility bridge backed by Archiver 8.
   The bridge has a semver-compatible local identity and its exact source remains pinned by repository tests.
 - Made the backend incremental compiler cache part of the disposable build output and added a post-build import-closure check so a stale cache cannot produce an incomplete deploy artifact.

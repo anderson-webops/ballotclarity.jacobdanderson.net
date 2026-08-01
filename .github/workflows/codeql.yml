@@ -28,12 +28,12 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24.18.0
+          node-version: 24.18.1
           cache: npm
 
       - name: Pin npm version
         run: |
-          npm i -g npm@11.16.0
+          npm i -g npm@12.0.2 --allow-scripts=npm
           npm -v
 
       - name: Initialize CodeQL
