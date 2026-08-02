@@ -41,6 +41,7 @@ test("nuxt config uses srcDir and expected civic modules", async () => {
 	assert.equal(config.runtimeConfig?.public?.apiFetchTimeoutMs, 15_000);
 	assert.equal(config.runtimeConfig?.adminApiFetchTimeoutMs, 15_000);
 	assert.ok(typeof config.runtimeConfig?.public?.buildId === "string" && config.runtimeConfig.public.buildId.length > 0);
+	assert.match(config.runtimeConfig?.public?.buildId || "", /^[0-9a-f]{40}$/u);
 	assert.equal(config.runtimeConfig?.public?.siteUrl, "https://ballotclarity.org");
 	assert.equal(config.runtimeConfig?.public?.operatorLegalName, "Jacob Anderson");
 	assert.equal(config.runtimeConfig?.public?.governingLaw, "State of Georgia");

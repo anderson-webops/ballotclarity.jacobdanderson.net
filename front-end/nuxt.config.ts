@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import process from "node:process";
 import { defineNuxtConfig } from "nuxt/config";
 import { buildContentSecurityPolicy } from "./server/utils/content-security-policy";
@@ -9,12 +10,26 @@ import { resolveRequestTimeoutMs } from "./src/utils/request-timeout";
 const assetVersion = "20260417";
 const isDev = process.env.NODE_ENV === "development";
 const buildId = process.env.NUXT_PUBLIC_BUILD_ID
-	|| process.env.RELEASE_VERSION
-	|| process.env.SOURCE_VERSION
+	|| process.env.SOURCE_REVISION
+	|| process.env.COMMIT_REF
 	|| process.env.VERCEL_GIT_COMMIT_SHA
 	|| process.env.GITHUB_SHA
+	|| process.env.CF_PAGES_COMMIT_SHA
 	|| process.env.COMMIT_SHA
-	|| `local-${Date.now().toString(36)}`;
+	|| (() => {
+		try {
+			return execFileSync("git", ["rev-parse", "HEAD"], {
+				cwd: import.meta.dirname,
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+		}
+		catch {
+			return process.env.RELEASE_VERSION
+				|| process.env.SOURCE_VERSION
+				|| `local-${Date.now().toString(36)}`;
+		}
+	})();
 const publicApiBase = process.env.NUXT_PUBLIC_API_BASE || "http://127.0.0.1:3001/api";
 const analyticsOrigins = analyticsTrackers.map(tracker => `https://${tracker.domain}`);
 const contentSecurityPolicy = buildContentSecurityPolicy({
