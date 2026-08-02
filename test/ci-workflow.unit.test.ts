@@ -39,7 +39,7 @@ test("GitHub workflows pin every third-party action to a commit", () => {
 
 	assert.match(workflows, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/);
 	assert.match(workflows, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
-	assert.match(workflows, /github\/codeql-action\/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81/);
+	assert.match(workflows, /github\/codeql-action\/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38/);
 	assert.match(workflows, /JetBrains\/qodana-action@b588768b6e7e6da579e518bc584f79de0d243692/);
 });
 
