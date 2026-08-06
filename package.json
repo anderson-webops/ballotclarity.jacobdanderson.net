@@ -104,7 +104,7 @@
 			"archiver": "$archiver"
 		},
 		"simple-git": "3.36.0",
-		"fast-uri": "3.1.4",
+		"fast-uri": "3.1.5",
 		"postcss": "8.5.24",
 		"shell-quote": "1.10.0",
 		"svgo": "4.0.2",
