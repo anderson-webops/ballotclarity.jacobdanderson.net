@@ -96,7 +96,7 @@ import { createAdminLoginThrottle } from "./admin-login-throttle.js";
 import { createAdminRepository } from "./admin-repository.js";
 import { parseAdminSessionToken } from "./admin-session-token.js";
 import { normalizeAdminUsername } from "./admin-store.js";
-import { buildBallotContentProviderSummary, getPublicBallotContentProviderOptions } from "./ballot-content-providers.js";
+import { getPublicBallotContentProviderOptions } from "./ballot-content-providers.js";
 import { createBoundedPromiseCache, resolveBoundedCacheInteger } from "./bounded-promise-cache.js";
 import { BoundedRateLimitStore } from "./bounded-rate-limit-store.js";
 import { createCensusGeocoderClient } from "./census-geocoder.js";
@@ -119,7 +119,6 @@ import { getOfficialToolsForState, getStateAbbreviationForName, getStateNameForA
 import { createOpenFecClient } from "./openfec.js";
 import { createOpenStatesClient } from "./openstates.js";
 import { buildCongressProfileImages, uniqueProfileImages } from "./profile-images.js";
-import { buildProviderSummary } from "./provider-config.js";
 import { parseTrustProxySetting } from "./proxy-trust.js";
 import { createPublicRequestThrottle } from "./public-request-throttle.js";
 import { buildCuratedPublicSourceRecords, mapAuthorityToPublisherType } from "./public-source-directory.js";
@@ -4546,6 +4545,34 @@ export async function createApp(options: CreateAppOptions = {}) {
 		next();
 	});
 
+	const sendProbe = (request: Request, response: Response, ok: boolean) => {
+		const probe = response.status(ok ? 200 : 503).set("Cache-Control", "no-store");
+		return request.method === "HEAD" ? probe.end() : probe.json({ ok });
+	};
+	const healthHandler = (request: Request, response: Response) => sendProbe(request, response, true);
+	const checkReadiness = async () => {
+		try {
+			await adminRepository.getHealth();
+			return !coverageRepository.configuredSnapshotMissing;
+		}
+		catch (error) {
+			logger.error("health.dependency_failed", {
+				error: error instanceof Error ? error.name : "AdminRepositoryHealthCheckFailed"
+			});
+			return false;
+		}
+	};
+	const readinessHandler = async (request: Request, response: Response) => {
+		return sendProbe(request, response, await checkReadiness());
+	};
+
+	app.head("/healthz", healthHandler);
+	app.get("/healthz", healthHandler);
+	for (const path of ["/readyz", "/health"]) {
+		app.head(path, readinessHandler);
+		app.get(path, readinessHandler);
+	}
+
 	app.use(cors({
 		credentials: true,
 		origin: createCorsOriginResolver()
@@ -4587,46 +4614,6 @@ export async function createApp(options: CreateAppOptions = {}) {
 	app.use("/api/admin", (_request, response, next) => {
 		response.setHeader("Cache-Control", "no-store, private");
 		next();
-	});
-
-	app.get("/health", async (_request, response) => {
-		try {
-			await adminRepository.getHealth();
-			const healthSnapshotProvenance = buildCoverageSnapshotProvenance(coverageRepository);
-			const healthySnapshot = !coverageRepository.configuredSnapshotMissing;
-
-			response.status(healthySnapshot ? 200 : 503).json({
-				assetMode: sourceAssetStore.mode,
-				coverageMode: coverageRepository.mode,
-				coverageUpdatedAt: coverageRepository.data.updatedAt,
-				driver: adminRepository.driver,
-				message: healthySnapshot ? undefined : "Configured live coverage package is missing.",
-				ok: healthySnapshot,
-				ballotContentProviderSummary: buildBallotContentProviderSummary(),
-				providerSummary: buildProviderSummary(),
-				ready: healthySnapshot,
-				snapshotProvenance: healthSnapshotProvenance,
-				timestamp: new Date().toISOString()
-			});
-		}
-		catch (error) {
-			logger.error("health.dependency_failed", {
-				error: error instanceof Error ? error.message : "Admin repository health check failed."
-			});
-			response.status(503).json({
-				assetMode: sourceAssetStore.mode,
-				coverageMode: coverageRepository.mode,
-				coverageUpdatedAt: coverageRepository.data.updatedAt,
-				driver: adminRepository.driver,
-				message: "Dependency health check failed.",
-				ok: false,
-				ballotContentProviderSummary: buildBallotContentProviderSummary(),
-				providerSummary: buildProviderSummary(),
-				ready: false,
-				snapshotProvenance: buildCoverageSnapshotProvenance(coverageRepository),
-				timestamp: new Date().toISOString()
-			});
-		}
 	});
 
 	app.post("/api/admin/auth/login", async (request, response) => {

@@ -95,6 +95,10 @@ That command:
 - starts the API locally
 - probes `/health` and a real ZIP lookup (`84604`) to confirm districts and representatives populate
 
+For production monitoring, use the minimal `GET`/`HEAD` probes documented in
+[`HEALTHCHECKS.md`](HEALTHCHECKS.md). `/health` remains a compatibility alias for
+readiness, while `/healthz` is dependency-free liveness.
+
 Write a local seed snapshot so the API can run in snapshot mode for route and UI verification:
 
 ```bash

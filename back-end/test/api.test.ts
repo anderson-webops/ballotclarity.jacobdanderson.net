@@ -1238,7 +1238,7 @@ after(async () => {
 		process.env.SOURCE_ASSET_BASE_URL = previousSourceAssetBaseUrl;
 });
 
-test("GET /health returns readiness and coverage metadata", async () => {
+test("monitor probes are minimal, unauthenticated, and non-cacheable", async () => {
 	const response = await fetch(`${baseUrl}/health`);
 	const body = await response.json();
 
@@ -1255,21 +1255,25 @@ test("GET /health returns readiness and coverage metadata", async () => {
 	assert.equal(response.headers.get("referrer-policy"), "strict-origin-when-cross-origin");
 	assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
 	assert.match(response.headers.get("permissions-policy") || "", /camera=\(\)/);
-	assert.equal(body.ok, true);
-	assert.equal(body.ready, true);
-	assert.equal(body.ballotContentProviderSummary.total, 5);
-	assert.equal(body.driver, "sqlite");
-	assert.equal(body.coverageMode, "snapshot");
-	assert.equal(body.assetMode, "public-mirror");
-	assert.equal(body.snapshotProvenance.status, "seed");
-	assert.equal(body.snapshotProvenance.sourceLabel, "Test seed coverage snapshot");
-	assert.equal(body.snapshotProvenance.configuredSnapshotMissing, false);
-	assertNoPublicSnapshotPaths(body);
-	assert.equal(body.providerSummary.total >= 6, true);
-	assert.match(body.timestamp, /^\d{4}-\d{2}-\d{2}T/);
+	assert.deepEqual(body, { ok: true });
+	assert.equal(response.headers.get("cache-control"), "no-store");
+	assert.equal(response.headers.get("set-cookie"), null);
+	assert.equal(response.headers.get("location"), null);
+	assert.equal(response.headers.get("www-authenticate"), null);
+
+	const liveness = await fetch(`${baseUrl}/healthz`);
+	assert.equal(liveness.status, 200);
+	assert.deepEqual(await liveness.json(), { ok: true });
+
+	for (const path of ["/healthz", "/readyz"]) {
+		const head = await fetch(`${baseUrl}${path}`, { method: "HEAD" });
+		assert.equal(head.status, 200);
+		assert.equal(await head.text(), "");
+		assert.equal(head.headers.get("cache-control"), "no-store");
+	}
 });
 
-test("GET /health allows credentialed CORS for local dev origins", async () => {
+test("monitor probes do not opt into credentialed cross-origin access", async () => {
 	const response = await fetch(`${baseUrl}/health`, {
 		headers: new Headers([
 			["Origin", "http://localhost:3333"]
@@ -1277,8 +1281,8 @@ test("GET /health allows credentialed CORS for local dev origins", async () => {
 	});
 
 	assert.equal(response.status, 200);
-	assert.equal(response.headers.get("access-control-allow-origin"), "http://localhost:3333");
-	assert.equal(response.headers.get("access-control-allow-credentials"), "true");
+	assert.equal(response.headers.get("access-control-allow-origin"), null);
+	assert.equal(response.headers.get("access-control-allow-credentials"), null);
 });
 
 test("OPTIONS /api/location answers local dev CORS preflight with credentials enabled", async () => {
@@ -1370,7 +1374,7 @@ test("default runtime stays empty instead of auto-seeding coverage and public op
 	}
 });
 
-test("configured missing snapshot path fails health and surfaces missing provenance", async () => {
+test("configured missing snapshot path fails readiness without exposing provenance", async () => {
 	const previousLiveCoverageFile = process.env.LIVE_COVERAGE_FILE;
 	const previousLiveCoverageRequired = process.env.LIVE_COVERAGE_REQUIRED;
 	const workspace = mkdtempSync(join(tmpdir(), "ballot-clarity-missing-snapshot-"));
@@ -1399,10 +1403,7 @@ test("configured missing snapshot path fails health and surfaces missing provena
 		const statusBody = await statusResponse.json();
 
 		assert.equal(healthResponse.status, 503);
-		assert.equal(healthBody.ok, false);
-		assert.equal(healthBody.ready, false);
-		assert.equal(healthBody.snapshotProvenance.configuredSnapshotMissing, true);
-		assertNoPublicSnapshotPaths(healthBody, missingSnapshotPath);
+		assert.deepEqual(healthBody, { ok: false });
 
 		assert.equal(coverageResponse.status, 200);
 		assert.equal(coverageBody.coverageMode, "empty");
